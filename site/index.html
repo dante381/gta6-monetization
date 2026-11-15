@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GTA 6 Stream Auto Clipper</title>
+<meta name="description" content="A personal tool that turns the owner's own GTA 6 gameplay streams into YouTube Shorts on the owner's own channel.">
+<style>
+  :root {
+    --bg: #f7f7f8; --card: #ffffff; --text: #1d1d22; --muted: #5b5b66;
+    --accent: #c2185b; --border: #e3e3e8;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #121216; --card: #1b1b21; --text: #ececf1; --muted: #a3a3ae;
+            --accent: #f06292; --border: #2c2c35; }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  main { max-width: 720px; margin: 0 auto; padding: 40px 16px 56px; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 28px 24px; }
+  h1 { font-size: 1.8rem; line-height: 1.25; margin: 0 0 8px; }
+  h2 { font-size: 1.15rem; margin: 28px 0 8px; }
+  .lead { color: var(--muted); margin: 0 0 8px; font-size: 1.05rem; }
+  ul { padding-left: 1.2em; margin: 8px 0; }
+  li { margin: 4px 0; }
+  a { color: var(--accent); }
+  footer { margin-top: 24px; color: var(--muted); font-size: 0.9rem; text-align: center; }
+</style>
+</head>
+<body>
+<main>
+  <div class="card">
+    <h1>GTA 6 Stream Auto Clipper</h1>
+    <p class="lead">A personal tool that turns the owner's own GTA 6 gameplay streams into YouTube Shorts.</p>
+
+    <h2>What it does</h2>
+    <ul>
+      <li>Records the owner's own live gameplay stream on the owner's laptop.</li>
+      <li>Finds the most exciting moments and cuts them into short vertical clips.</li>
+      <li>Uploads those clips as Shorts to the owner's own YouTube channel through the YouTube Data API.</li>
+    </ul>
+
+    <h2>Who it is for</h2>
+    <p>This is a private, single-user tool. It is not offered to the public and it only ever acts on
+      the owner's own YouTube channel. It asks Google for one permission only: uploading videos
+      (the <code>youtube.upload</code> scope).</p>
+
+    <h2>Privacy</h2>
+    <p>The sign-in token stays on the owner's laptop and no data is shared with anyone.
+      Read the full <a href="privacy.html">privacy policy</a>.</p>
+
+    <h2>Contact</h2>
+    <p>Questions: <a href="mailto:CONTACT_EMAIL_PLACEHOLDER">CONTACT_EMAIL_PLACEHOLDER</a></p>
+  </div>
+  <footer>
+    <a href="privacy.html">Privacy policy</a>
+  </footer>
+</main>
+</body>
+</html>

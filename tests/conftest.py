@@ -21,6 +21,14 @@ from clipper import env as _env  # noqa: E402
 
 _env.apply_to_current_process()
 
+
+def pytest_configure(config):
+    """Per-process basetemp inside the project: parallel pytest runs must not wipe each other
+    (and nothing goes to C:). An explicit --basetemp on the command line still wins."""
+    if not config.option.basetemp:
+        config.option.basetemp = ROOT / ".tmp" / "pytest" / f"run-{os.getpid()}"
+
+
 FAKE_CLAUDE = ROOT / "tests" / "fakes" / "fake_claude.py"
 FIXTURE_CACHE = ROOT / ".tmp" / "test_fixtures"
 
