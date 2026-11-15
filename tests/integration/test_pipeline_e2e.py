@@ -86,11 +86,20 @@ def test_synthetic_chunk_to_clips(synthetic_chunk, claude_scenario, tmp_path, mo
         assert "GTA 6" in side["title"] and "#Shorts" in side["hashtags"]
         assert 5 <= side["duration_s"] <= cfg.scoring.clip_max_s + 0.5
 
+    # every kept clip is produced as a backup first; promotion to ready needs the percentile cut
+    # (a single synthetic chunk has fewer samples than min_samples, the final decision logs its outcome)
+    assert _events("selection")
+    assert all(c.route in ("backup", "publish") for c in selected)
+    assert len(state.history_scores(200)) == len(cands)       # every scored candidate, drops included
+    assert not list(paths.DATA.ready.glob("*.mp4")) or _events("promoted")
+
     # test mode: nothing uploaded, would_upload logged for queued publish clips
     assert not _events("upload")
     pubs = [q for q in state.queue_items() if q.kind == "publish"]
     if pubs:
         assert _events("would_upload")
+    # backups are never uploaded (publish.upload_backups false)
+    assert not _events("would_upload") or all(e.get("item_kind") == "publish" for e in _events("would_upload"))
 
     # chunk footage cleaned up at stream end
     assert state.get_chunk(sid, 0).status == "deleted" and not dst.exists()

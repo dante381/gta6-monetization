@@ -346,3 +346,38 @@ def test_toast_swallows_errors(monkeypatch):
     monkeypatch.setattr(notify, "_last_toast", 0.0)
     monkeypatch.setattr(notify.os, "name", "nt")
     assert notify.toast("t", "m", wait=True) is True
+
+
+# ------------------------------------------------------------------ chat checks
+def test_chat_down_by_status_and_heartbeat(hcfg_, state):
+    assert only(hcfg_, state, "chat_down") == []                       # no supervisor
+    heartbeat.beat("supervisor", procs={"chat": {"status": "backoff", "uptime_s": 0}})
+    f = only(hcfg_, state, "chat_down")
+    assert [x.key for x in f] == ["chat_down"] and f[0].level == "warn"
+    heartbeat.beat("supervisor", procs={"chat": {"status": "running", "uptime_s": 9999}})
+    assert len(only(hcfg_, state, "chat_down")) == 1                   # running but no heartbeat
+    heartbeat.beat("chat", phase="collecting")
+    assert only(hcfg_, state, "chat_down") == []
+    heartbeat.beat("supervisor", procs={"chat": {"status": "running", "uptime_s": 5}})
+    heartbeat.clear("chat")
+    assert only(hcfg_, state, "chat_down") == []                       # startup grace
+    heartbeat.beat("supervisor", procs={"chat": {"status": "done", "uptime_s": 0}})
+    assert only(hcfg_, state, "chat_down") == []                       # exited 0 on purpose
+    heartbeat.beat("supervisor", procs={"chat": {"status": "running", "uptime_s": 9999}})
+    assert only(load_config(overrides={"chat": {"enabled": False}}), state, "chat_down") == []
+    assert only(hcfg_, state, "process_down") == []                    # chat is not "critical"
+
+
+def test_chat_silent(hcfg_, state):
+    state.set_current_stream("s1")
+    now = time.time()
+    state.add_chunk(Chunk(idx=0, path="x.ts", start_s=0, duration_s=300, recorded_at=now - 3000, stream_id="s1"))
+    assert only(hcfg_, state, "chat_silent") == []                     # recorder not recording
+    heartbeat.beat("recorder", phase="recording")
+    f = only(hcfg_, state, "chat_silent")
+    assert len(f) == 1 and f[0].level == "info" and f[0].key == "chat_silent"
+    state.chat_add("s1", int(now), 3, 2, 1.0, 0, [])
+    assert only(hcfg_, state, "chat_silent") == []
+    state.set_current_stream("s2")
+    state.add_chunk(Chunk(idx=0, path="y.ts", start_s=0, duration_s=300, recorded_at=now - 400, stream_id="s2"))
+    assert only(hcfg_, state, "chat_silent") == []                     # live for < 30 min

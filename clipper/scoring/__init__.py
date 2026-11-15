@@ -6,17 +6,21 @@ signal_score = 100 * sum(w_i * s_i) / sum(w_i)   (over the signals measurable fo
                - penalties (menu_loading, radio, repeat), clamped to 0..100
 final_score  = (1 - judge_weight) * signal + judge_weight * rating * 10   (judge only if
                signal >= locked judge_gate and Claude answered; otherwise final = signal)
-route        = drop < backup <= backup < publish <= publish   (cfg.locked.thresholds)
+route        = drop < backup <= backup   (cfg.locked.thresholds.backup; "publish" is decided later by
+               clipper.selection from the score percentile)
 """
 from __future__ import annotations
 
 import logging
 from typing import Callable
 
+import numpy as np
+
 from .. import log as eventlog
 from ..models import AudioFeatures, Candidate, Chunk, VisualFeatures
 from .candidates import (Activity, Window, activity_curve, assign_track, chunk_duration, detect_windows,
                          find_peaks, radio_ranges_in, sget, weighted_score)
+from .chat import ChatSignal, chat_curve, chat_signal
 from .cutscene import CUTSCENE_SIGNALS, cutscene_signals, cutscene_window
 from .gameplay import GAMEPLAY_SIGNALS, SignalResult, gameplay_signals
 from .judge import build_prompt, final_score, route_for, run_judges
@@ -39,13 +43,15 @@ def _weights(cfg, track: str) -> dict:
 
 
 def score_window(win: Window, chunk: Chunk, stream_id: str, audio: AudioFeatures, visual: VisualFeatures,
-                 act: Activity, cfg, state) -> Candidate:
-    """Signals + menu/radio penalties for one window (repeat penalty is applied by score_chunk)."""
+                 act: Activity, cfg, state, chats: dict | None = None) -> Candidate:
+    """Signals + menu/radio penalties for one window (repeat penalty is applied by score_chunk).
+    `chats` (optional) receives {candidate_id: ChatSignal} for the judge prompt."""
     ws, we, peak = win.ws, win.we, win.peak
+    chat = chat_signal(state, cfg, stream_id, chunk.start_s + ws, chunk.start_s + we, chunk.start_s + peak)
     if win.track == "cutscene":
-        sr = cutscene_signals(ws, we, peak, audio, visual, act, cfg, state)
+        sr = cutscene_signals(ws, we, peak, audio, visual, act, cfg, state, chat=chat)
     else:
-        sr = gameplay_signals(ws, we, peak, audio, visual, act, cfg)
+        sr = gameplay_signals(ws, we, peak, audio, visual, act, cfg, chat=chat)
     weights = _weights(cfg, win.track)
     base = weighted_score(sr.raw, weights, sr.available)
     penalties: dict[str, float] = {}
@@ -59,8 +65,11 @@ def score_window(win: Window, chunk: Chunk, stream_id: str, audio: AudioFeatures
         events.append("menu / loading screen")
     signal = max(0.0, min(100.0, base - sum(penalties.values())))
     peak_s = chunk.start_s + peak
+    cid = f"{stream_id}-{chunk.idx}-{int(peak_s * 10)}"
+    if chats is not None and chat.value is not None:
+        chats[cid] = chat
     return Candidate(
-        id=f"{stream_id}-{chunk.idx}-{int(peak_s * 10)}",
+        id=cid,
         chunk_idx=chunk.idx,
         start_s=round(max(0.0, chunk.start_s + ws), 3),
         peak_s=round(peak_s, 3),
@@ -97,14 +106,16 @@ def score_chunk(chunk: Chunk, audio: AudioFeatures, visual: VisualFeatures, cfg,
                 on_tick: Callable[[], None] | None = None) -> list[Candidate]:
     stream_id = chunk.stream_id or (state.current_stream() if state is not None else "") or "stream"
     dur = chunk_duration(chunk, audio, visual)
-    act = activity_curve(dur, audio, visual, cfg)
+    chat_arr = chat_curve(state, cfg, stream_id, chunk.start_s, max(1, int(np.ceil(dur - 1e-9))))
+    act = activity_curve(dur, audio, visual, cfg, chat=chat_arr)
     windows = detect_windows(act, visual, cfg, chunk.start_s)
-    cands = [score_window(w, chunk, stream_id, audio, visual, act, cfg, state) for w in windows]
+    chats: dict[str, ChatSignal] = {}
+    cands = [score_window(w, chunk, stream_id, audio, visual, act, cfg, state, chats) for w in windows]
     if on_tick:
         on_tick()
     apply_repeats(cands, state, stream_id, cfg)
 
-    run_judges(cands, chunk, dur, cfg, on_tick)
+    run_judges(cands, chunk, dur, cfg, on_tick, chats=chats)
 
     jw = float(sget(cfg, "judge_weight", 0.3))
     for c in cands:
@@ -112,6 +123,8 @@ def score_chunk(chunk: Chunk, audio: AudioFeatures, visual: VisualFeatures, cfg,
         c.final_score = round(final_score(c.signal_score, rating, jw), 2)
         c.route = route_for(c.final_score, cfg)
         c.meta = build_meta(c, cfg)
+        if state is not None:       # population for percentile selection: every scored candidate
+            state.history_add(c.id, stream_id, c.final_score)
 
     cands.sort(key=lambda c: c.peak_s)
     for c in cands:

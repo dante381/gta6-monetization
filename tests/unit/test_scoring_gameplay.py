@@ -104,7 +104,7 @@ def test_ai_unavailable_reweights_over_measurable_signals(cfg, state):
     w = _gp_weights(cfg)
     raw_sum = sum(w[k] * c.signals[k] for k in c.signals)          # without rescaling (max 80)
     avail_w = sum(w[k] for k in c.signals)
-    assert avail_w == 80
+    assert avail_w == 100 - w["hud_events"] - w["chat"]               # no Claude, no chat data
     assert c.signal_score == pytest.approx(100 * raw_sum / avail_w, abs=0.05)
     assert c.signal_score > raw_sum + 10
     assert c.signal_score >= 60          # not unfairly capped without Claude

@@ -374,3 +374,35 @@ def test_health_restarts_stuck_worker_without_counting_a_crash(tmp_path, state):
     assert sup.worker.crash_times == {}
     assert [f.code for f in seen] == ["stuck_stage"]
     assert heartbeat.read("supervisor") is None   # cleared at shutdown
+
+
+# ------------------------------------------------------------------ chat collector (non-critical third process)
+def test_chat_crash_is_non_critical(tmp_path, state):
+    rec = script(tmp_path, "rec", "import sys; sys.exit(0)")
+    wrk = script(tmp_path, "worker", "import time; time.sleep(1.2)")
+    chat = script(tmp_path, "chat", "import sys; sys.exit(3)")
+    agent = FakeAgent()
+    sup = Supervisor(
+        mk_cfg(), "http://example/live", state, spawn=plain_spawn, repair_agent=agent,
+        commands={"recorder": rec, "worker": wrk, "chat": chat})
+    assert "chat" in sup.procs
+    run_with_timeout(sup)
+    c = sup.procs["chat"]
+    assert c.starts >= 3                      # restarted with backoff after each non-zero exit
+    assert agent.reports == []                # never triggers the repair agent
+    assert not state.publish_hold()
+    assert sup.worker.status == "done"        # stream-end handling was not blocked by chat
+    assert c.status == "stopped"              # stopped together with the others
+
+
+def test_chat_exit_zero_not_restarted_and_disabled_flag(tmp_path, state):
+    rec = script(tmp_path, "rec", "import sys; sys.exit(0)")
+    wrk = script(tmp_path, "worker", "import time; time.sleep(1.0)")
+    chat = script(tmp_path, "chat", "import sys; sys.exit(0)")
+    cmds = {"recorder": rec, "worker": wrk, "chat": chat}
+    sup = Supervisor(mk_cfg(), "u", state, spawn=plain_spawn, commands=cmds, repair=False)
+    run_with_timeout(sup)
+    assert sup.procs["chat"].starts == 1 and sup.procs["chat"].status in ("done", "stopped")
+    off = load_config(overrides={"chat": {"enabled": False}})
+    assert "chat" not in Supervisor(off, "u", state, spawn=plain_spawn, commands=cmds).procs
+    assert sv.default_commands("u")["chat"][-2:] == ["clipper", "chat"]

@@ -19,6 +19,7 @@ import signal
 import sys
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Sequence
 
@@ -34,19 +35,21 @@ from clipper.supervisor.repair import release_repair_hold  # noqa: E402
 
 log = logging.getLogger("clipper.supervisor")
 
-RECORDER, WORKER = "recorder", "worker"
+RECORDER, WORKER, CHAT = "recorder", "worker", "chat"
 
 
 def default_commands(url: str) -> dict[str, list[str]]:
     py = str(paths.VENV_PY)
     return {RECORDER: [py, "-m", "clipper", "record", "--url", url],
-            WORKER: [py, "-m", "clipper", "work"]}
+            WORKER: [py, "-m", "clipper", "work"],
+            CHAT: [py, "-m", "clipper", "chat"]}
 
 
 class Supervisor:
     def __init__(self, cfg, url: str, state, spawn: Callable | None = None, clock: Callable[[], float] | None = None,
                  *, commands: dict[str, Sequence[str]] | None = None, repair_agent=None, repair: bool = True,
-                 once: bool = False, job: JobObject | None = None, notifier: Callable | None = None):
+                 once: bool = False, job: JobObject | None = None, notifier: Callable | None = None,
+                 window: bool = False, now_fn: Callable[[], datetime] | None = None):
         self.cfg = cfg
         self.url = url
         self.state = state
@@ -71,6 +74,20 @@ class Supervisor:
         cmds = commands or default_commands(url)
         self.procs: dict[str, ManagedProc] = {
             name: ManagedProc(name, cmds[name], self._do_spawn, self.clock) for name in (RECORDER, WORKER)}
+        # Live-chat collector: optional and NON-CRITICAL (never repaired, never holds publishing,
+        # never delays the stream-end shutdown).
+        if CHAT in cmds and bool((cfg.get("chat") or {}).get("enabled", False)):
+            self.procs[CHAT] = ManagedProc(CHAT, cmds[CHAT], self._do_spawn, self.clock)
+        # Launch-day window mode (see runwindow.py): the pipeline keeps running across stream ends
+        # until the window closes, then drains, runs the final selection and stops for good.
+        self.window_mode = bool(window)
+        self._now = now_fn or (lambda: datetime.now(timezone.utc))
+        self._finishing = False
+        self._finish_started = 0.0
+        self._final_worker_started = False
+        self._window_done = False
+        self._window_restart_s = float(s.get("window_restart_delay_s", 30))
+        self._stop_kill_s = float(s.get("window_stop_kill_s", 90))
         self._stop = threading.Event()
         self._stop_reason = ""
         self._repair_thread: threading.Thread | None = None
@@ -128,10 +145,129 @@ class Supervisor:
                 self._stop.wait(self.poll_s)
         finally:
             self._shutdown()
+        if self.window_mode and self._finishing:
+            self._window_wrapup()
         return 0
+
+    def _window_wrapup(self) -> None:
+        """The day is over: write the report, retire the scheduled task, never run again unless re-armed."""
+        from clipper import runwindow
+        reason = "grace expired" if self._window_done else "window finished and drained"
+        try:
+            runwindow.mark_consumed(reason)
+        except Exception:
+            log.exception("could not mark the window consumed")
+        try:
+            runwindow.remove()
+        except Exception:
+            log.exception("could not remove the scheduled task")
+        report = ""
+        try:
+            from clipper import report as report_mod
+            report = report_mod.make_report(self.state, self.cfg, self.state.current_stream(), use_claude=False)
+        except Exception:
+            log.exception("report failed")
+        left = 0
+        try:
+            left = len(self.state.queue_items(status="queued"))
+        except Exception:
+            pass
+        msg = (f"Launch-day run finished ({reason}). Report: {report or 'n/a'}. "
+               f"{left} clip(s) left queued. The run will not start again until `python -m clipper window rearm`.")
+        elog.event("window_finished", reason=reason, queued_left=left, report=report)
+        elog.attention(msg)
+        try:
+            from clipper import notify
+            notify.toast("GTA6 clipper: launch day finished", msg, min_gap_s=0)
+        except Exception:
+            pass
+
+    # -------------------------------------------------------------- launch-day window
+    def _window_status(self) -> str:
+        from clipper import runwindow
+        return runwindow.status(self.cfg, self._now())
+
+    def _stream_live_now(self) -> bool:
+        """Recorder is up and a (new) stream is being recorded or awaited, not marked done."""
+        try:
+            return self.recorder.status == RUNNING and not bool(self.state.kv_get("recorder.done", False))
+        except Exception:
+            return False
+
+    def _window_tick(self) -> None:
+        """Day mode: keep the pipeline alive across stream ends until the window closes, then
+        wind down once: stop recording, let the worker drain + run the final selection, exit."""
+        if not self.window_mode or self._window_done:
+            return
+        st = self._window_status()
+        if st in ("draining", "over", "none") and not self._finishing:
+            self._begin_finish(st)
+        if not self._finishing:
+            # a new stream came up (recorder restarted): bring the idle worker/chat back
+            if self._stream_live_now():
+                for name in (WORKER, CHAT):
+                    p = self.procs.get(name)
+                    if p is not None and p.status == DONE:
+                        log.info("window: new stream, restarting idle %s", name)
+                        self._start(p)
+            return
+        # ---- finishing
+        rec, wrk = self.recorder, self.worker
+        if rec.status == RUNNING:
+            self._request_recorder_stop()
+        if rec.status in (DONE, STOPPED) and wrk.status == DONE and not self._final_worker_started:
+            # the worker had already drained an earlier stream; the last one still needs its
+            # remaining chunks + the final selection
+            self._final_worker_started = True
+            if self._unprocessed() or self.state.kv_get("recorder.done", False):
+                log.info("window: starting a final worker pass")
+                self._start(wrk)
+        grace = float((self._window_cfg() or {}).get("drain_grace_min", 180)) * 60.0
+        if st == "over" or (self.clock() - self._finish_started) > grace:
+            log.error("window: drain grace used up; stopping everything now")
+            elog.event("window_grace_expired")
+            self._window_done = True
+
+    def _window_cfg(self) -> dict | None:
+        from clipper import runwindow
+        try:
+            return runwindow.get_window(self.cfg)
+        except Exception:
+            return None
+
+    def _begin_finish(self, st: str) -> None:
+        self._finishing = True
+        self._finish_started = self.clock()
+        elog.event("window_end", status=st)
+        log.info("window closed (%s): stopping the recorder and draining", st)
+        rec = self.recorder
+        if rec.status in (BACKOFF, CAPPED, DONE, IDLE, REPAIRING, STOPPED):
+            rec.status = DONE
+            self.state.kv_set("recorder.done", True)  # lets the worker finalize
+            return
+        # RUNNING: if only waiting for a stream (nothing recorded in this run) kill it; else ask nicely
+        info = heartbeat.read(RECORDER) or {}
+        if info.get("phase") == "waiting":
+            rec.kill()
+            rec.status = DONE
+            self.state.kv_set("recorder.done", True)
+        else:
+            self._request_recorder_stop()
+
+    def _request_recorder_stop(self) -> None:
+        try:
+            self.state.kv_set("recorder.stop", True)
+        except Exception:
+            log.exception("could not set recorder.stop")
+        if self.clock() - self._finish_started > self._stop_kill_s and self.recorder.status == RUNNING:
+            log.warning("recorder ignored the stop request for %.0f s; killing it", self._stop_kill_s)
+            self.recorder.kill()
+            self.recorder.status = DONE
+            self.state.kv_set("recorder.done", True)
 
     def _tick(self) -> None:
         self._check_repair_done()
+        self._window_tick()
         for p in self.procs.values():
             if p.status == RUNNING:
                 rc = p.poll()
@@ -178,8 +314,15 @@ class Supervisor:
 
     def _finished(self) -> bool:
         rec, wrk = self.recorder, self.worker
+        if self.window_mode:
+            if self._window_done:
+                return True
+            # day mode ends only after the window closed and everything drained
+            return (self._finishing and rec.status in (DONE, STOPPED)
+                    and (wrk.status in (DONE, STOPPED) or (wrk.capped and wrk.status == CAPPED))
+                    and (self._final_worker_started or wrk.status != DONE or not self._unprocessed()))
         if self.once:
-            return all(p.status in (DONE, STOPPED) for p in self.procs.values())
+            return all(p.status in (DONE, STOPPED) for n, p in self.procs.items() if n != CHAT)
         if rec.status != DONE:
             return False
         if wrk.status in (DONE, STOPPED):
@@ -218,10 +361,23 @@ class Supervisor:
         elog.event("proc_exit", name=p.name, pid=p.pid, rc=rc, uptime_s=round(uptime, 1))
         if rc == 0:
             p.streak = 0
+            if p.name == CHAT:
+                p.status = DONE
+                log.info("chat collector exited 0 (not restarted)")
+                return
             if p.name == RECORDER:
                 p.status = DONE
                 log.info("recorder exited 0: stream ended, letting the worker drain")
                 elog.event("stream_end", source="supervisor")
+                if self.window_mode and not self._finishing:
+                    # the day isn't over: wait for the next stream (channel /live) and record it too
+                    p.schedule_restart(self._window_restart_s)
+                    elog.event("window_wait_next_stream", delay_s=self._window_restart_s)
+                return
+            if self.window_mode and not self._finishing and p.name == WORKER:
+                # drained the stream; idle (DONE) until the recorder is back on a new stream
+                p.status = DONE
+                elog.event("worker_drained")
                 return
             if self.once or (self.recorder.status == DONE and not self._unprocessed()):
                 p.status = DONE
@@ -381,6 +537,8 @@ def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     ap.add_argument("--url", default=None, help="stream URL (default: stream.url in settings.yaml)")
     ap.add_argument("--no-repair", action="store_true", help="never launch the Claude repair agent")
     ap.add_argument("--once", action="store_true", help="run recorder+worker once, no restarts (testing)")
+    ap.add_argument("--window", action="store_true",
+                    help="launch-day mode: run only inside run_window (config/locked.yaml), then stop for good")
     return ap.parse_args(list(argv) if argv is not None else None)
 
 
@@ -402,8 +560,25 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not url:
         elog.attention("Supervisor: no stream URL (pass --url or set stream.url in config/settings.yaml)")
         return 2
+    if args.window:
+        import os
+        from clipper import runwindow
+        ok, why = runwindow.may_start(cfg)
+        if not ok and why.startswith("too early"):
+            wait = runwindow.seconds_until(cfg, "start")
+            if 0 < wait <= 900:  # woke a little early: wait for it
+                log.info("window starts in %.0fs; waiting", wait)
+                time.sleep(wait)
+                ok, why = runwindow.may_start(cfg)
+        if not ok:
+            log.warning("window run refused: %s", why)
+            elog.event("window_refused", reason=why)
+            return 0  # exit 0: Task Scheduler must not retry
+        os.environ[runwindow.WINDOW_ENV] = "1"  # children inherit: only a window run may upload live
+        runwindow.mark_started()
     state = StateDB()
-    sup = Supervisor(cfg, url, state, repair=not args.no_repair, once=args.once)
+    state.kv_set("recorder.stop", False)  # a stale stop request must not end a new run
+    sup = Supervisor(cfg, url, state, repair=not args.no_repair, once=args.once, window=args.window)
     for name in ("SIGINT", "SIGTERM", "SIGBREAK"):
         sig = getattr(signal, name, None)
         if sig is not None:

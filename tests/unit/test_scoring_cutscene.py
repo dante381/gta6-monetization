@@ -95,5 +95,6 @@ def test_cutscene_without_ai_reweights(cfg, state):
     assert c.track == "cutscene"
     assert set(c.signals) == {"spectacle", "music_swell"}
     w = cfg.scoring.cutscene_weights
-    expect = 100 * (w.spectacle * c.signals["spectacle"] + w.music_swell * c.signals["music_swell"]) / 45
+    expect = 100 * (w.spectacle * c.signals["spectacle"] + w.music_swell * c.signals["music_swell"]) / (
+        w.spectacle + w.music_swell)
     assert abs(c.signal_score - expect) < 0.05

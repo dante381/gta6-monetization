@@ -6,9 +6,10 @@ import numpy as np
 from ..models import AudioFeatures, VisualFeatures
 from .candidates import (Activity, amax, bursts, clip01, dominant_scene_tag, motion_slice, p90, sget,
                          window_frames)
+from .chat import chat_events
 from .gameplay import SignalResult
 
-CUTSCENE_SIGNALS = ("title_text", "spectacle", "newness", "music_swell")
+CUTSCENE_SIGNALS = ("title_text", "spectacle", "newness", "music_swell", "chat")
 AI_ONLY = ("title_text", "newness")
 
 
@@ -82,7 +83,7 @@ def cutscene_window(act: Activity, peak: int, ws: float, we: float, cfg,
 
 
 def cutscene_signals(ws: float, we: float, peak: float, audio: AudioFeatures, visual: VisualFeatures,
-                     act: Activity, cfg, state) -> SignalResult:
+                     act: Activity, cfg, state, chat=None) -> SignalResult:
     frames = window_frames(visual, ws, we, peak)
     ai_ok = bool(visual.ai_ok)
     events: list[str] = ["letterbox cutscene"]
@@ -119,4 +120,8 @@ def cutscene_signals(ws: float, we: float, peak: float, audio: AudioFeatures, vi
                 events.append(f"new scene: {tag}")
         else:
             raw["newness"] = 0.5
+    if chat is not None and chat.value is not None:      # ChatSignal; None/unavailable -> dropped
+        raw["chat"] = float(chat.value)
+        available.add("chat")
+        events.extend(chat_events(chat))
     return SignalResult(raw=raw, scored=dict(raw), available=available, events=events, scene_tag=tag)

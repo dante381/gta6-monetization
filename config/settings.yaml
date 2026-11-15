@@ -2,7 +2,7 @@
 # Threshold / caps / kill switch / test_mode live in locked.yaml.
 
 stream:
-  url: ""                         # stream URL or channel /live URL (https://www.youtube.com/@channel/live)
+  url: "https://www.youtube.com/channel/UCBNu1yLC-wvk0udZf3bZykQ/live"   # the channel's /live: finds the scheduled launch stream and any restart
   format: "bv*[height<=720][protocol^=m3u8]+ba[protocol^=m3u8]/b[height<=720][protocol^=m3u8]/bv*[height<=720]+ba/b[height<=720]"   # prefer HLS (m3u8); live YouTube gives 2 URLs (video + audio)
   live_poll_s: 60                 # how often to check whether the channel is live
   ytdlp_timeout_s: 180            # kill a yt-dlp call that takes longer than this
@@ -63,17 +63,19 @@ scoring:
   clip_max_s: 45
   cutscene_min_s: 30
   letterbox_share: 0.6            # share of window with bars => cutscene track
-  gameplay_weights:
-    audio_spike: 30
-    action: 25
-    hud_events: 20
-    sound_type: 15
+  gameplay_weights:               # must total 100; `chat` is dropped + rescaled when there is no chat data
+    audio_spike: 25
+    action: 22
+    hud_events: 18
+    sound_type: 10
     duration: 10
-  cutscene_weights:
-    title_text: 30
-    spectacle: 25
-    newness: 25
-    music_swell: 20
+    chat: 15
+  cutscene_weights:               # must total 100
+    title_text: 25
+    spectacle: 22
+    newness: 20
+    music_swell: 18
+    chat: 15
   penalties:
     menu_loading: 30              # points removed when window is mostly menu/map/loading
     repeat: 25                    # points removed for a repeat
@@ -87,7 +89,8 @@ scoring:
     motion: 0.3                   # motion + cuts + flashes + shake
     ai: 0.3                       # Claude action / HUD events / title text (dropped if Claude unavailable)
     letterbox: 0.3                # additive bonus while bars are on screen
-  activity_min: 0.25              # peaks below this activity are ignored
+    chat: 0.25                    # chat reaction (rate spike / hype / clip requests), dropped if no chat data
+  activity_min: 0.25             # peaks below this activity are ignored
   sustain_frac: 0.5               # window extends while activity >= this share of the peak
   max_window_overlap: 0.5         # a weaker peak whose window overlaps a stronger one more than this is skipped
   sustain_level: 0.35             # activity counted as "action" for the duration signal
@@ -97,6 +100,26 @@ scoring:
   newness_decay: 0.5              # newness = decay ** times the scene_tag was already selected
   scene_repeat_window_s: 120      # same scene_tag as a selected clip within this many seconds => repeat
   judge_frame_width: 1280         # judge stills width (px)
+
+chat:                             # live-chat reaction as a scoring signal (aggregates only, no usernames stored)
+  enabled: true
+  bucket_s: 5                     # aggregation bucket (wall-clock seconds)
+  lag_s: 12                       # viewers react this long AFTER the moment (stream latency + reading time)
+  window_pad_s: 4                 # extra seconds of chat considered around a candidate's peak
+  baseline_minutes: 10            # rolling "normal chat" window the spike is measured against
+  min_msgs_total: 20              # fewer messages than this in the stream so far => chat ignored (dropped + rescaled)
+  rate_full_z: 3.0                # message-rate z-score that counts as a full spike
+  hype_full: 6.0                  # hype score per window that counts as full
+  clip_req_full: 2                # explicit clip requests per window that count as full
+  signal_blend: {rate: 0.5, hype: 0.3, clip: 0.2}
+  hype_words: [omg, lmao, lmfao, lol, lool, insane, crazy, wtf, no way, nooo, noooo, wow, wild, sick, goat,
+               pog, poggers, holy, clean, w, huge, unreal, bro, bruh, dead, cooked, nuts, banger]
+  hype_emotes: ["🔥", "😂", "🤣", "😱", "💀", "🤯", "👏", "🙌", "😮", "🥶", "💯"]
+  clip_phrases: ["clip it", "clip that", "clip this", "clipped", "clip!", "get that clipped", "make a clip"]
+  sample_max_chars: 80
+  sample_per_bucket: 3
+  judge_excerpt_n: 12             # chat lines shown to the Claude judge around a candidate
+  collector_poll_s: 2.0
 
 production:
   width: 1080
@@ -131,7 +154,7 @@ publish:
   slot_hours: 2.4                 # one Short every 2.4 h  (2 to 3 h)
   first_slot_delay_min: 30
   daily_upload_limit: 100
-  upload_backups: true            # 50-74 clips uploaded unlisted after the day's scheduled posts
+  upload_backups: false           # kept clips below the percentile cut are NOT uploaded (set true to upload them unlisted)
   category_id: "20"               # Gaming
   game_name: "GTA 6"
   base_hashtags: ["#Shorts", "#GTA6"]

@@ -9,3 +9,4 @@ google-auth-oauthlib>=1.2
 google-auth-httplib2>=0.2
 yt-dlp[default]
 pytest>=8.3
+pytchat>=0.5.5

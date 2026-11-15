@@ -257,6 +257,8 @@ def check_process_down(ctx: Ctx) -> list[Finding]:
     grace = float(ctx.cfg.supervisor.get("startup_grace_s", hang))
     out = []
     for name, info in (sup.get("procs") or {}).items():
+        if name == "chat":  # non-critical: covered by check_chat_down
+            continue
         if info.get("status") != "running" or float(info.get("uptime_s", 0)) <= grace + hang:
             continue
         hb = heartbeat.read(name)
@@ -266,6 +268,56 @@ def check_process_down(ctx: Ctx) -> list[Finding]:
                                f"{name} should be running but its heartbeat is "
                                f"{'missing' if age is None else f'{age:.0f}s old'}", f"process_down:{name}", name))
     return out
+
+
+def _chat_enabled(ctx: Ctx) -> bool:
+    try:
+        return bool((ctx.cfg.get("chat") or {}).get("enabled", False))
+    except Exception:
+        return False
+
+
+def check_chat_down(ctx: Ctx) -> list[Finding]:
+    if not _chat_enabled(ctx):
+        return []
+    sup = heartbeat.read("supervisor")
+    hang = float(ctx.cfg.supervisor.get("hang_s", 120))
+    if not sup or ctx.now - float(sup.get("ts", 0)) > max(hang, 3 * float(ctx.cfg.supervisor.get("heartbeat_s", 30))):
+        return []
+    info = (sup.get("procs") or {}).get("chat")
+    if not info:
+        return []
+    key = "chat_down"
+    if info.get("status") in ("backoff", "capped", "stopped"):
+        return [Finding("warn", "chat_down", f"chat collector is down (status {info.get('status')}); "
+                        "chat signal will be missing", key, "chat")]
+    if info.get("status") != "running":
+        return []
+    grace = float(ctx.cfg.supervisor.get("startup_grace_s", hang))
+    if float(info.get("uptime_s", 0)) <= grace + hang:
+        return []
+    hb = heartbeat.read("chat")
+    age = None if not hb else ctx.now - float(hb.get("ts", 0))
+    if age is None or age > 2 * hang:
+        return [Finding("warn", "chat_down", f"chat collector heartbeat is "
+                        f"{'missing' if age is None else f'{age:.0f}s old'}; chat signal will be missing", key, "chat")]
+    return []
+
+
+def check_chat_silent(ctx: Ctx) -> list[Finding]:
+    if not _chat_enabled(ctx):
+        return []
+    hb = _worker_alive_hb(ctx, "recorder")
+    sid = ctx.stream()
+    if not hb or hb.get("phase") != "recording" or not sid:
+        return []
+    wall = ctx.state.stream_wall_start(sid)
+    if wall is None or ctx.now - wall <= 1800:
+        return []
+    if ctx.state.chat_total_msgs(sid) == 0:
+        return [Finding("info", "chat_silent", "chat is empty or unreadable; chat signal is being ignored",
+                        "chat_silent", "chat")]
+    return []
 
 
 def check_disk_low(ctx: Ctx) -> list[Finding]:
@@ -350,7 +402,7 @@ def check_publish_state(ctx: Ctx) -> list[Finding]:
 CHECKS: list[Callable[[Ctx], list[Finding]]] = [
     check_stuck_stage, check_gpu_wait_loop, check_error_burst, check_repeated_failure, check_no_new_chunks,
     check_backlog, check_process_down, check_disk_low, check_memory, check_claude, check_no_selection,
-    check_publish_state,
+    check_publish_state, check_chat_down, check_chat_silent,
 ]
 
 

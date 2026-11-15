@@ -54,7 +54,17 @@ def live_test_mode(cfg: Any) -> bool:
         file_val = bool(data["test_mode"])
     except Exception:
         file_val = True
-    return cfg_val or file_val
+    if not (cfg_val or file_val):
+        return False
+    # test_mode is on. The ONLY override: a launch-day run window with uploads enabled, and only
+    # inside a process started by `supervise --window` (see clipper/runwindow.py).
+    try:
+        from .. import runwindow
+        if runwindow.uploads_allowed(cfg):
+            return False
+    except Exception:  # noqa: BLE001 - any doubt: stay in test mode
+        pass
+    return True
 
 
 def _recover_uploading(state: Any) -> None:

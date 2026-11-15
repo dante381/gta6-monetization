@@ -71,6 +71,25 @@ CREATE TABLE IF NOT EXISTS seen_scenes (
     first_s REAL,
     count INTEGER DEFAULT 0
 );
+-- Live chat, AGGREGATED per bucket (wall-clock epoch seconds). No usernames are ever stored:
+-- `chatters` is a count, `samples` a few short anonymised texts used only for the Claude judge.
+CREATE TABLE IF NOT EXISTS chat_buckets (
+    stream_id TEXT NOT NULL,
+    t INTEGER NOT NULL,           -- bucket start, epoch seconds (floored to chat.bucket_s)
+    msgs INTEGER DEFAULT 0,
+    chatters INTEGER DEFAULT 0,
+    hype REAL DEFAULT 0,          -- summed hype score (hype words / emotes) in the bucket
+    clip_reqs INTEGER DEFAULT 0,  -- explicit "clip it" style requests
+    samples TEXT DEFAULT '[]',    -- JSON list of up to chat.sample_per_bucket short texts
+    PRIMARY KEY (stream_id, t)
+);
+-- Every scored candidate's final score (dropped ones too): the population for percentile selection.
+CREATE TABLE IF NOT EXISTS score_history (
+    cand_id TEXT PRIMARY KEY,
+    stream_id TEXT,
+    final_score REAL,
+    ts REAL
+);
 """
 
 _QUEUE_COLS = [f.name for f in fields(QueueItem)]
@@ -214,6 +233,65 @@ class StateDB:
         rows = self._x("SELECT DISTINCT scene_tag FROM candidates WHERE stream_id=? AND route!='drop' "
                        "AND scene_tag IS NOT NULL", (stream_id,))
         return {r["scene_tag"] for r in rows}
+
+    # ------------------------------------------------------------------ wall clock <-> stream seconds
+    def stream_wall_start(self, stream_id: str) -> float | None:
+        """Wall-clock epoch of stream second 0 (start of chunk 0), or None before chunk 0 is closed.
+        stream_seconds = epoch - stream_wall_start."""
+        row = self._x("SELECT recorded_at, duration_s, start_s FROM chunks WHERE stream_id=? "
+                      "ORDER BY idx LIMIT 1", (stream_id,)).fetchone()
+        if row is None or not row["recorded_at"]:
+            return None
+        return float(row["recorded_at"]) - float(row["duration_s"]) - float(row["start_s"])
+
+    # ------------------------------------------------------------------ chat (aggregated)
+    def chat_add(self, stream_id: str, t: int, msgs: int = 0, chatters: int = 0, hype: float = 0.0,
+                 clip_reqs: int = 0, samples: list[str] | None = None, max_samples: int = 3) -> None:
+        """Merge one observation into the bucket starting at epoch second `t`."""
+        row = self._x("SELECT samples FROM chat_buckets WHERE stream_id=? AND t=?", (stream_id, int(t))).fetchone()
+        old = json.loads(row["samples"]) if row else []
+        merged = (old + list(samples or []))[:max_samples]
+        self._x("""INSERT INTO chat_buckets(stream_id, t, msgs, chatters, hype, clip_reqs, samples)
+                   VALUES(?,?,?,?,?,?,?)
+                   ON CONFLICT(stream_id, t) DO UPDATE SET msgs=msgs+excluded.msgs,
+                     chatters=MAX(chatters, excluded.chatters), hype=hype+excluded.hype,
+                     clip_reqs=clip_reqs+excluded.clip_reqs, samples=excluded.samples""",
+                (stream_id, int(t), int(msgs), int(chatters), float(hype), int(clip_reqs), json.dumps(merged)))
+
+    def chat_between(self, stream_id: str, t0: float, t1: float) -> list[dict]:
+        """Buckets with t0 <= t < t1 (epoch seconds), oldest first."""
+        rows = self._x("SELECT * FROM chat_buckets WHERE stream_id=? AND t>=? AND t<? ORDER BY t",
+                       (stream_id, int(t0), int(t1)))
+        return [{"t": r["t"], "msgs": r["msgs"], "chatters": r["chatters"], "hype": r["hype"],
+                 "clip_reqs": r["clip_reqs"], "samples": json.loads(r["samples"])} for r in rows]
+
+    def chat_last_t(self, stream_id: str) -> int | None:
+        row = self._x("SELECT MAX(t) AS m FROM chat_buckets WHERE stream_id=?", (stream_id,)).fetchone()
+        return None if row["m"] is None else int(row["m"])
+
+    def chat_total_msgs(self, stream_id: str) -> int:
+        row = self._x("SELECT COALESCE(SUM(msgs),0) AS n FROM chat_buckets WHERE stream_id=?", (stream_id,)).fetchone()
+        return int(row["n"])
+
+    # ------------------------------------------------------------------ score history (percentile selection)
+    def history_add(self, cand_id: str, stream_id: str, final_score: float) -> None:
+        self._x("""INSERT INTO score_history(cand_id, stream_id, final_score, ts) VALUES(?,?,?,?)
+                   ON CONFLICT(cand_id) DO UPDATE SET final_score=excluded.final_score""",
+                (cand_id, stream_id, float(final_score), time.time()))
+
+    def history_scores(self, limit: int = 200) -> list[float]:
+        """The most recent `limit` candidate scores across all streams (this stream included)."""
+        rows = self._x("SELECT final_score FROM score_history ORDER BY ts DESC, rowid DESC LIMIT ?", (int(limit),))
+        return [float(r["final_score"]) for r in rows]
+
+    def set_candidate_route(self, cand_id: str, route: str) -> None:
+        """Change a candidate's route (e.g. backup -> publish on promotion), in the column and the JSON."""
+        row = self._x("SELECT json FROM candidates WHERE id=?", (cand_id,)).fetchone()
+        if row is None:
+            return
+        d = json.loads(row["json"])
+        d["route"] = route
+        self._x("UPDATE candidates SET route=?, json=? WHERE id=?", (route, json.dumps(d), cand_id))
 
     # ------------------------------------------------------------------ seen scenes (newness)
     def scene_count(self, tag: str) -> int:

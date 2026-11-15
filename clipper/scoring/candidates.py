@@ -15,7 +15,7 @@ from ..models import AudioFeatures, Chunk, VisualFeatures, VisualFrame
 MENU_KINDS = ("menu", "loading", "map")
 BIG_HUD = ("wasted", "busted", "mission_passed")
 
-DEFAULT_ACTIVITY_WEIGHTS = {"audio": 0.4, "motion": 0.3, "ai": 0.3, "letterbox": 0.3}
+DEFAULT_ACTIVITY_WEIGHTS = {"audio": 0.4, "motion": 0.3, "ai": 0.3, "letterbox": 0.3, "chat": 0.25}
 
 
 # --------------------------------------------------------------------- config helpers
@@ -188,6 +188,7 @@ class Activity:
     menu: np.ndarray              # bool: Claude says menu/map/loading
     total: np.ndarray             # 0..1 combined activity
     weights: dict = field(default_factory=dict)
+    chat: np.ndarray | None = None  # 0..1 chat reaction per second (None: no chat data)
 
     def cut_indicator(self) -> np.ndarray:
         return (self.letterbox >= 0.5) | self.cut_ai
@@ -219,7 +220,8 @@ def _frame_ai_value(f: VisualFrame) -> float:
     return v
 
 
-def activity_curve(duration: float, audio: AudioFeatures, visual: VisualFeatures, cfg) -> Activity:
+def activity_curve(duration: float, audio: AudioFeatures, visual: VisualFeatures, cfg,
+                   chat: np.ndarray | None = None) -> Activity:
     n = max(1, int(np.ceil(duration - 1e-9)))
     fac = radio_factor(cfg)
 
@@ -265,13 +267,21 @@ def activity_curve(duration: float, audio: AudioFeatures, visual: VisualFeatures
     w = dict(DEFAULT_ACTIVITY_WEIGHTS)
     w.update({k: float(v) for k, v in (sget(cfg, "activity_weights", {}) or {}).items()})
     wa, wm, wai = w["audio"], w["motion"], (w["ai"] if visual.ai_ok else 0.0)
-    s = (wa + wm + wai) or 1.0
-    total = (wa * audio_m + wm * cv + wai * ai) / s + w["letterbox"] * lb
+    chat_arr = None
+    wc = 0.0
+    if chat is not None:                       # chat unavailable -> dropped, the rest rescaled
+        chat_arr = np.zeros(n)
+        k = min(n, len(chat))
+        chat_arr[:k] = np.clip(np.asarray(chat, float)[:k], 0.0, 1.0)
+        wc = w["chat"]
+    s = (wa + wm + wai + wc) or 1.0
+    total = (wa * audio_m + wm * cv + wai * ai + (wc * chat_arr if chat_arr is not None else 0.0)) / s         + w["letterbox"] * lb
     total = total * (1.0 - 0.7 * np.maximum(static, menu.astype(float)))
     total = np.clip(total, 0.0, 1.0)
     return Activity(n=n, duration=float(duration), audio=audio_m, audio_raw=audio_raw, cv=cv, ai=ai,
-                    letterbox=lb, cut_ai=cut_ai, static=static, menu=menu, total=total,
-                    weights={"audio": wa / s, "motion": wm / s, "ai": wai / s, "letterbox": w["letterbox"]})
+                    letterbox=lb, cut_ai=cut_ai, static=static, menu=menu, total=total, chat=chat_arr,
+                    weights={"audio": wa / s, "motion": wm / s, "ai": wai / s, "chat": wc / s,
+                             "letterbox": w["letterbox"]})
 
 
 # --------------------------------------------------------------------- peaks and windows

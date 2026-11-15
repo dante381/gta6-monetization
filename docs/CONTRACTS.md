@@ -130,7 +130,20 @@ Spec: `GTA6_Stream_Auto_Clipper_Plan.md`. This file pins the interfaces between 
   - the judge for signal score ≥ `cfg.locked.thresholds.judge_gate`, using `ffmpeg.grab_frames` plus `claude_cli.call(schema="judge", effort=cfg.claude.effort_judge)`
   - the final score, route and template metadata
   - `state.save_candidate`, `state.mark_scene`, and `log.event("candidate")`
-- Routes: drop when < `backup`, backup when below `publish`, publish otherwise.
+- Routes at scoring time: `drop` when final < `thresholds.backup`, otherwise `backup` (`thresholds.publish` is legacy/unused).
+  Every scored candidate's final score is appended to `score_history`.
+- Publishing is decided afterwards by `clipper.selection.decide(cfg, state, stream_id, final=False)`, called by the worker every
+  loop and with `final=True` at stream end: threshold = `selection.percentile` (90th) of the last `selection.history` scores;
+  a produced backup is promoted to `publish` (moved to `DATA.ready`, sidecar + queue row updated) only when its score is
+  strictly above the threshold AND >= `selection.floor` (50). Holds until `min_samples` (30) scores exist; at stream end needs
+  `end_min_samples` (10). Backups are never uploaded (`publish.upload_backups: false`).
+- Chat (`clipper.chat`, process `chat`, pytchat, no API quota) stores aggregated 5 s buckets in `chat_buckets` (no usernames);
+  `scoring.chat` turns them into a 0..100 signal (rate z-score, hype words, clip requests) used by both tracks, and the judge
+  prompt shows sanitized excerpts inside an UNTRUSTED_CHAT block.
+- Launch-day window (`locked.run_window`, `clipper.runwindow`, `supervise --window`): runs only between `start` and `end`
+  (+`drain_grace_min`), keeps restarting recorder/worker across stream ends, at `end` sets kv `recorder.stop`, drains, runs the
+  final selection, marks `data/run_window.json` consumed and removes the scheduled task. Live uploads are allowed only in a
+  process started this way (env `CLIPPER_WINDOW_RUN=1`); everything else stays in `test_mode`.
 - Titles always include `cfg.publish.game_name`. The hashtags include `#Shorts`. Spoiler clips (cutscene track) get "spoiler" in the title.
 
 **E. Production:** `clipper/production/`
@@ -150,7 +163,7 @@ Spec: `GTA6_Stream_Auto_Clipper_Plan.md`. This file pins the interfaces between 
 - `queue.py`: `enqueue(sidecar, state, cfg)`.
 - `publish_tick(cfg, state, now=None, youtube=None) -> list[dict]` is called by the worker every loop. It:
   - honours PAUSE, `test_mode` (`would_upload` events), `state.publish_hold()`, caps, slots and the daily upload limit (Pacific day)
-  - uploads backups after scheduled posts
+  - uploads backups after scheduled posts only when `publish.upload_backups` is true (default false)
   - on `AuthRequired`: `set_publish_hold(True, "auth")` plus `log.attention`
 - The `youtube` param is injectable for tests.
 - Uploads are resumable with `MediaFileUpload` and `videos.insert`.

@@ -5,7 +5,8 @@ Loop:
      -> scoring (+judge) -> mark processed
   2. produce clips whose footage is fully on disk (a candidate running past the newest chunk
      waits for the next chunk; at stream end it is clamped to the footage available)
-  3. queue produced clips for publishing, run a publish tick
+  3. queue produced clips (as backups), promote the ones above the score percentile to publish
+     (selection.decide; at stream end with final=True), run a publish tick
   4. delete chunks that are no longer needed:
        chunk N is deleted when it is processed, all clips touching it are cut, AND chunk N+1
        is processed (or the stream has ended) -- unless the supervisor set keep_chunks.
@@ -41,7 +42,7 @@ def _is_gpu_wait(exc: BaseException) -> bool:
 class Worker:
     def __init__(self, cfg, state: StateDB, hb: heartbeat.Heartbeat | None = None, *,
                  analyze_audio=None, analyze_video=None, score_chunk=None, produce_clip=None,
-                 publish_tick=None, enqueue=None, idle_sleep_s: float = 5.0):
+                 publish_tick=None, enqueue=None, decide=None, idle_sleep_s: float = 5.0):
         self.cfg = cfg
         self.state = state
         self.hb = hb or heartbeat.Heartbeat("worker", interval=cfg.supervisor.heartbeat_s)
@@ -53,6 +54,7 @@ class Worker:
         self._produce_clip = produce_clip
         self._publish_tick = publish_tick
         self._enqueue = enqueue
+        self._decide = decide
 
     # ------------------------------------------------------------------ stage resolution
     def _stage(self, name: str):
@@ -71,6 +73,8 @@ class Worker:
             from .publish import publish_tick as fn
         elif name == "enqueue":
             from .publish import enqueue as fn
+        elif name == "decide":
+            from .selection import decide as fn
         setattr(self, f"_{name}", fn)
         return fn
 
@@ -92,10 +96,12 @@ class Worker:
                     self.process_chunk_safely(chunk)
                     did_work = True
                 did_work |= self.produce_pending(sid) > 0
+                self.select(sid)
                 self.cleanup(sid)
             self.publish()
             if sid and self.stream_finished(sid):
                 self.produce_pending(sid, final=True)
+                self.select(sid, final=True)
                 self.cleanup(sid, final=True)
                 self.drain_publish()
                 logmod.event("worker_done", stream_id=sid)
@@ -198,6 +204,16 @@ class Worker:
             self.state.save_candidate(cand, sid, produced=True)
             produced += 1
         return produced
+
+    # ------------------------------------------------------------------ selection
+    def select(self, sid: str, final: bool = False) -> None:
+        """Percentile selection: promote produced backups that beat the cut. Never stops the pipeline."""
+        try:
+            self.tick(stage="select")
+            self._stage("decide")(self.cfg, self.state, sid, final=final)
+        except Exception:  # noqa: BLE001
+            log.exception("selection failed")
+            logmod.event("selection_error", stream_id=sid, final=final)
 
     # ------------------------------------------------------------------ publishing
     def publish(self) -> None:

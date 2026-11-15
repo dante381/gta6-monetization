@@ -1,11 +1,23 @@
 # Locked settings: the repair agent may NOT edit this file (supervisor rejects any diff touching it).
 thresholds:
-  publish: 75        # final score >= 75 -> queued for scheduled publishing
-  backup: 50         # 50..74 -> backup (unlisted); below -> dropped
+  publish: 75        # LEGACY fixed line, no longer used for selection (see `selection` below)
+  backup: 50         # final score below this is dropped; the floor for every kept clip
   judge_gate: 60     # signal score >= 60 -> Claude judge
+selection:           # which clips get published: top slice of the recent score distribution
+  mode: percentile
+  percentile: 90     # a clip is published only if its final score is above this percentile ...
+  floor: 50          # ... AND at least this score (a dull stream may publish nothing)
+  history: 200       # population = the last N candidate scores across streams (this stream included)
+  min_samples: 30    # fewer samples than this: clips are held and decided later (at the latest at stream end)
+  end_min_samples: 10  # at stream end: decide with at least this many samples, else publish none
 caps:
   daily_total: 10
   daily_cutscene: 3
 kill_switch_file: PAUSE
-test_mode: true      # true: everything runs except uploads
+test_mode: true      # true: everything runs except uploads (exception: the run_window below)
+run_window:          # launch day: ONE bounded run, then never again until `python -m clipper window rearm`
+  start: "2026-11-19T00:00:00+05:30"   # 12:00 AM IST on 19 November 2026
+  end:   "2026-11-20T00:00:00+05:30"   # the whole day, even if the stream ends and restarts
+  drain_grace_min: 180                  # after `end`: finish processing and uploads, then stop
+  uploads: true                         # uploads ONLY between `start` and `end` + grace, ONLY in a `supervise --window` run
 memory_limit_mb: 2048

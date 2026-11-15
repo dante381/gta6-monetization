@@ -11,6 +11,8 @@ What the automatic audio/video analysis detected:
 - Signal values (0..1): $signals
 - Signal score: $signal_score / 100
 
+$chat
+
 Question: would a stranger scrolling YouTube Shorts stop and watch this clip to the end?
 
 Rate it 1 to 10:

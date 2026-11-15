@@ -51,9 +51,10 @@ def test_routing_thresholds(cfg):
     th = cfg.locked.thresholds
     assert route_for(th.backup - 0.01, cfg) == "drop"
     assert route_for(th.backup, cfg) == "backup"
+    # the legacy publish line decides nothing: publishing is chosen later by clipper.selection
     assert route_for(th.publish - 0.01, cfg) == "backup"
-    assert route_for(th.publish, cfg) == "publish"
-    assert route_for(100, cfg) == "publish"
+    assert route_for(th.publish, cfg) == "backup"
+    assert route_for(100, cfg) == "backup"
 
 
 def test_judge_gate_calls_claude_with_frames(cfg, state, fake_grab, fake_claude_calls, claude_scenario):

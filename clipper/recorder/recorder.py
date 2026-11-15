@@ -84,6 +84,7 @@ class Recorder:
         # A previous stream's "done" flag must not make the worker exit (and the supervisor restart
         # it in a loop) while this run is still waiting for the next stream to go live.
         self.state.kv_set("recorder.done", False)
+        self.state.kv_set("recorder.video_id", None)  # a stale id must never be used by the chat collector
         info = stream.wait_until_live(self.url, self.cfg, self.hb, runner=self.runner, sleep=self.sleep)
         self._open_stream(info)
         attempt = 0
@@ -105,6 +106,10 @@ class Recorder:
                 if last_reason == "max":
                     log.info("max chunks (%s) reached, stopping", self.max_chunks)
                     return 0
+                if last_reason == "stop":
+                    log.info("stop requested (end of the run window); partial chunk registered")
+                    self._finish()
+                    return 0
                 if self.closed_this_run > before:
                     attempt = 0
                 continue
@@ -120,6 +125,13 @@ class Recorder:
                 return 0
 
     # ------------------------------------------------------------------ stream / resume
+    def _stop_requested(self) -> bool:
+        """kv `recorder.stop` is set by the supervisor at the end of the launch-day window."""
+        try:
+            return bool(self.state.kv_get("recorder.stop", False))
+        except Exception:
+            return False
+
     def _ours_live(self, st: dict) -> bool:
         return st.get("status") == LIVE and st.get("video_id") == self.video_id
 
@@ -134,6 +146,7 @@ class Recorder:
         self.state.set_current_stream(self.stream_id)
         self.state.kv_set("recorder.done", False)
         self.state.kv_set("recorder.title", self.title)
+        self.state.kv_set("recorder.video_id", self.video_id)
         self._kill_orphan_ffmpeg()
         last = self.state.last_chunk_idx(self.stream_id)
         if last >= 0:
@@ -239,6 +252,9 @@ class Recorder:
                 self._consume_csv(csv_path, seen)
                 if self.max_chunks is not None and self.closed_this_run >= self.max_chunks:
                     reason = "max"
+                    break
+                if self._stop_requested():
+                    reason = "stop"
                     break
                 rc = self.proc.poll()
                 if rc is not None:

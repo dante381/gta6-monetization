@@ -25,6 +25,11 @@ class Stages:
         self.order = []
         self.produced = []
         self.enqueued = []
+        self.decided = []
+
+    def decide(self, cfg, state, sid, final=False):
+        self.decided.append((sid, final))
+        return []
 
     def audio(self, chunk, cfg, state, on_tick=None):
         self.order.append(("audio", chunk.idx))
@@ -57,7 +62,8 @@ class Stages:
 
 def _worker(cfg, state, st):
     return Worker(cfg, state, analyze_audio=st.audio, analyze_video=st.video, score_chunk=st.score,
-                  produce_clip=st.produce, publish_tick=st.publish, enqueue=st.enqueue, idle_sleep_s=0)
+                  produce_clip=st.produce, publish_tick=st.publish, enqueue=st.enqueue, decide=st.decide,
+                  idle_sleep_s=0)
 
 
 def cand(cid, chunk_idx, start, end, route="publish", score=80):
@@ -243,3 +249,34 @@ def test_publish_error_does_not_stop_worker(state, cfg, tmp_path):
     w = Worker(cfg, state, analyze_audio=st.audio, analyze_video=st.video, score_chunk=st.score,
                produce_clip=st.produce, publish_tick=boom, enqueue=st.enqueue, idle_sleep_s=0)
     assert w.run(max_loops=10) == 0
+
+
+def test_decide_called_every_loop_and_final_at_end(state, cfg, tmp_path):
+    _mk_chunks(state, tmp_path, n=2)
+    sid = state.current_stream()
+    state.kv_set("recorder.done", True)
+    st = Stages({0: [cand("a", 0, 100.0, 140.0)]})
+    w = _worker(cfg, state, st)
+    assert w.run(max_loops=20) == 0
+    assert len(st.decided) >= 3
+    assert all(d[0] == sid for d in st.decided)
+    assert [f for _, f in st.decided].count(True) == 1 and st.decided[-1][1] is True
+    assert st.decided[0][1] is False
+    assert st.enqueued == ["a"]
+
+
+def test_failing_decide_does_not_stop_worker(state, cfg, tmp_path):
+    _mk_chunks(state, tmp_path, n=2)
+    state.kv_set("recorder.done", True)
+    st = Stages({0: [cand("a", 0, 100.0, 140.0)]})
+    calls = []
+
+    def boom(cfg, state, sid, final=False):
+        calls.append(final)
+        raise RuntimeError("selection exploded")
+
+    w = Worker(cfg, state, analyze_audio=st.audio, analyze_video=st.video, score_chunk=st.score,
+               produce_clip=st.produce, publish_tick=st.publish, enqueue=st.enqueue, decide=boom, idle_sleep_s=0)
+    assert w.run(max_loops=20) == 0
+    assert calls and calls[-1] is True
+    assert st.enqueued == ["a"]

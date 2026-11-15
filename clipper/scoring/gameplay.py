@@ -6,10 +6,11 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from ..models import AudioFeatures, VisualFeatures
+from .chat import chat_events
 from .candidates import (Activity, amax, bursts, clip01, dominant_scene_tag, in_ranges, motion_slice, p90,
                          radio_factor, radio_share, sget, window_frames)
 
-GAMEPLAY_SIGNALS = ("audio_spike", "action", "hud_events", "sound_type", "duration")
+GAMEPLAY_SIGNALS = ("audio_spike", "action", "hud_events", "sound_type", "duration", "chat")
 AI_ONLY = ("hud_events",)
 RADIO_MASKED = ("audio_spike", "sound_type")
 
@@ -78,7 +79,7 @@ def hud_signal(visual: VisualFeatures, ws: float, we: float, peak: float) -> tup
 
 
 def gameplay_signals(ws: float, we: float, peak: float, audio: AudioFeatures, visual: VisualFeatures,
-                     act: Activity, cfg) -> SignalResult:
+                     act: Activity, cfg, chat=None) -> SignalResult:
     ai_ok = bool(visual.ai_ok)
     fac = radio_factor(cfg)
     burst_full = float(sget(cfg, "burst_full", 6))
@@ -121,6 +122,11 @@ def gameplay_signals(ws: float, we: float, peak: float, audio: AudioFeatures, vi
     level = float(sget(cfg, "sustain_level", 0.35))
     sustained = int(np.count_nonzero(act.total[lo:hi] >= level)) if hi > lo else 0
     raw["duration"] = scored["duration"] = clip01(sustained / float(sget(cfg, "sustain_full_s", 8)))
+
+    if chat is not None and chat.value is not None:      # ChatSignal; None/unavailable -> dropped
+        raw["chat"] = scored["chat"] = float(chat.value)
+        available.add("chat")
+        events = events + chat_events(chat)
 
     if raw["audio_spike"] >= 0.6:
         events.append("big audio spike")
