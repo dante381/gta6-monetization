@@ -22,9 +22,13 @@ from ..env import subprocess_env
 log = logging.getLogger(__name__)
 
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-DEFAULT_FORMAT = "bv*[height<=720]+ba/b[height<=720]"
+# Prefer HLS (m3u8): ffmpeg records it directly with -c copy. DASH-only streams (some big/DVR
+# broadcasts) can't be recorded that way, so they are only a last-resort fallback and resolve_hls
+# turns them into a clear StreamError.
+DEFAULT_FORMAT = ("bv*[height<=720][protocol^=m3u8]+ba[protocol^=m3u8]/b[height<=720][protocol^=m3u8]"
+                  "/bv*[height<=720]+ba/b[height<=720]")
 STATUSES = ("is_live", "is_upcoming", "was_live", "not_live", "post_live", "error")
-INFO_TEMPLATE = "%(.{id,title,live_status,is_live})j"
+INFO_TEMPLATE = "%(.{id,title,live_status,is_live,protocol})j"
 
 
 class StreamError(RuntimeError):
@@ -134,7 +138,8 @@ def probe(url: str, cfg: Any, *, want_urls: bool = True, runner: Runner | None =
         res["status"] = _classify_error(err or "")
         res["error"] = (err or "").strip()[-1000:] or f"yt-dlp exit {rc}, no info"
         return res
-    res.update(status=_status_of(info), video_id=info.get("id"), title=info.get("title"), urls=urls)
+    res.update(status=_status_of(info), video_id=info.get("id"), title=info.get("title"), urls=urls,
+               protocol=info.get("protocol"))
     if rc != 0:
         res["error"] = (err or "").strip()[-1000:]
     return res
@@ -153,6 +158,10 @@ def resolve_hls(url: str, cfg: Any, *, runner: Runner | None = None,
     r = probe(url, cfg, want_urls=True, runner=runner, on_tick=on_tick)
     if not r["urls"]:
         raise StreamError(f"no playable URLs (status={r['status']}): {r['error'][-300:]}")
+    proto = str(r.get("protocol") or "").lower()
+    if "dash" in proto:
+        raise StreamError(f"this stream is only offered as DASH (protocol {proto}); ffmpeg cannot record it "
+                          f"with -c copy. HLS (m3u8) is required, which is what a normal PS5 live stream gives.")
     return r["urls"][:2]
 
 

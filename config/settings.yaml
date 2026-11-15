@@ -3,7 +3,7 @@
 
 stream:
   url: ""                         # stream URL or channel /live URL (https://www.youtube.com/@channel/live)
-  format: "bv*[height<=720]+ba/b[height<=720]"   # live YouTube: 2 URLs (video + audio playlists)
+  format: "bv*[height<=720][protocol^=m3u8]+ba[protocol^=m3u8]/b[height<=720][protocol^=m3u8]/bv*[height<=720]+ba/b[height<=720]"   # prefer HLS (m3u8); live YouTube gives 2 URLs (video + audio)
   live_poll_s: 60                 # how often to check whether the channel is live
   ytdlp_timeout_s: 180            # kill a yt-dlp call that takes longer than this
 
