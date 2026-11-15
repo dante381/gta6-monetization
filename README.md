@@ -113,6 +113,10 @@ python -m pytest
 
 `client_secret.json`, `token.json`, `secrets/`, `data/` and downloaded tools are git-ignored. The repair agent is blocked from reading the YouTube token.
 
+## License
+
+[MIT](LICENSE). Covers the code only; it grants no rights to any game footage the tool records or to the music you put in `music/`.
+
 ## Notes
 
 - Monetization of no-commentary gameplay and cutscene clips is not guaranteed; see *Risks and limits* in the plan.
