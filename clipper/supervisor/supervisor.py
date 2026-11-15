@@ -46,7 +46,7 @@ def default_commands(url: str) -> dict[str, list[str]]:
 class Supervisor:
     def __init__(self, cfg, url: str, state, spawn: Callable | None = None, clock: Callable[[], float] | None = None,
                  *, commands: dict[str, Sequence[str]] | None = None, repair_agent=None, repair: bool = True,
-                 once: bool = False, job: JobObject | None = None):
+                 once: bool = False, job: JobObject | None = None, notifier: Callable | None = None):
         self.cfg = cfg
         self.url = url
         self.state = state
@@ -76,6 +76,14 @@ class Supervisor:
         self._repair_thread: threading.Thread | None = None
         self._repair_result: tuple[bool, str] | None = None
         self._last_mem = float("-inf")
+        h = cfg.get("health") or {}
+        self.health_on = bool(h.get("enabled", True)) and not once
+        self.health_s = float(h.get("interval_s", 60))
+        self.health_cooldown_s = float(h.get("restart_cooldown_s", 600))
+        self._notifier = notifier
+        self._next_health = self.clock() + self.health_s
+        self._health_restarts: dict[str, float] = {}
+        self._hb = heartbeat.Heartbeat("supervisor", float(s.get("heartbeat_s", 30)))
 
     # -------------------------------------------------------------- plumbing
     def _do_spawn(self, cmd, **kw):
@@ -134,6 +142,39 @@ class Supervisor:
             elif p.status in (BACKOFF, CAPPED) and self.clock() >= p.next_start:
                 self._start(p)
         self._log_memory()
+        self._beat()
+        self._run_health()
+
+    # -------------------------------------------------------------- health
+    def _beat(self) -> None:
+        procs = {n: {"status": p.status, "uptime_s": round(p.uptime(), 1)} for n, p in self.procs.items()}
+        self._hb.tick(procs=procs)
+
+    def _run_health(self) -> None:
+        if not self.health_on or self.clock() < self._next_health:
+            return
+        self._next_health = self.clock() + self.health_s
+        try:
+            from clipper import health, notify
+            notifier = self._notifier or notify.make_notifier(self.cfg)
+            new = health.run_once(self.cfg, self.state, notifier)
+        except Exception:
+            log.exception("health pass failed")
+            return
+        for f in new:
+            if f.code in ("stuck_stage", "gpu_wait_loop") and f.proc == WORKER:
+                self._health_restart(self.worker, f)
+
+    def _health_restart(self, p: ManagedProc, f) -> None:
+        """Kill+restart a wedged (but heartbeating) worker. Not a crash: no crash signature is recorded."""
+        now = self.clock()
+        if p.status != RUNNING or now - self._health_restarts.get(f.key, float("-inf")) < self.health_cooldown_s:
+            return
+        self._health_restarts[f.key] = now
+        log.error("health: %s on %s; restarting it", f.code, p.name)
+        elog.event("health_restart", name=p.name, pid=p.pid, code=f.code, key=f.key, message=f.message[:300])
+        p.kill()
+        p.schedule_restart(self.backoff[0] if self.backoff else 0.0)
 
     def _finished(self) -> bool:
         rec, wrk = self.recorder, self.worker
@@ -326,6 +367,7 @@ class Supervisor:
             log.warning("waiting for the repair attempt to finish")
             self._repair_thread.join(timeout=30)
         self._log_memory(force=True)
+        heartbeat.clear("supervisor")
         if self._own_job and self.job is not None:
             self.job.close()
         nosleep.allow_sleep()

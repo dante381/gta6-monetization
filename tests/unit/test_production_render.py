@@ -146,8 +146,16 @@ def test_single_chunk_clip(gcfg, chunk, with_music, commands, isolated_data):
     assert not list(paths.DATA.work.iterdir()), "work files left behind"
     ev = [json.loads(l) for l in (paths.DATA.logs / "clips.jsonl").read_text(encoding="utf-8").splitlines()]
     assert any(e["kind"] == "clip_produced" and e["clip_id"] == c.id for e in ev)
-    cmd = " ".join(commands[0])
-    assert "overlay_cuda=0:220[bgh]" in cmd and "-loop" not in commands[0]   # hook overlaid, single frame
+    # Two-pass render: pass 1 = bg+fg (a single overlay_cuda, no hook), pass 2 = hook over the finished
+    # clip (a single overlay_cuda). Never two chained overlays: that fails on real footage.
+    renders = [" ".join(c) for c in commands if "-filter_complex" in c]
+    assert len(renders) == 2, renders
+    assert "overlay_cuda=0:656[vout]" in renders[0] and renders[0].count("overlay_cuda") == 1
+    assert "hwupload_cuda" not in renders[0] and "[bgh]" not in renders[0]
+    assert "overlay_cuda=0:220[vout]" in renders[1] and renders[1].count("overlay_cuda") == 1
+    assert "-c:a copy" in renders[1]                       # pass 2 does not re-encode the audio
+    assert all("-loop" not in c for c in commands)          # hook is a single frame
+    cmd = renders[0]
     # frame check artefact for a human/agent look (.tmp/production_frame_check_00_6.0.jpg)
     ffmpeg.grab_frames(out, [6.0], paths.TMP, width=1080, prefix="production_frame_check")
 
@@ -266,4 +274,5 @@ def test_never_cpu_encoder(gcfg, chunk, with_music, commands):
         joined = " ".join(low)
         assert "hwdownload" not in joined and " -vf " not in f" {joined} "
         if "-filter_complex" in low:
-            assert "h264_nvenc" in low and low.count("-hwaccel") == 2
+            # pass 1 decodes the source twice (bg crop + fg); pass 2 (hook) decodes the clip once
+            assert "h264_nvenc" in low and low.count("-hwaccel") in (1, 2)

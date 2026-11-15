@@ -163,3 +163,21 @@ claude:
   effort_repair: high
   effort_report: low
   timeout_s: 300
+
+health:
+  enabled: true
+  interval_s: 60                  # supervisor runs a health pass this often
+  watch_interval_s: 30            # `clipper health --watch` default
+  realert_s: 1800                 # same finding is not re-alerted within this
+  stuck_stage_s: 600              # worker heartbeat fresh but stage/chunk/cand unchanged this long
+  gpu_wait_s: 120                 # >2 "GPU unavailable" log lines within this
+  error_burst_n: 5
+  error_burst_window_s: 300
+  repeated_failure_n: 3
+  repeated_failure_window_s: 1800
+  backlog_n: 4
+  backlog_age_s: 900
+  disk_low_gb: 20
+  no_selection_chunks: 8
+  toast_min_gap_s: 60
+  restart_cooldown_s: 600         # supervisor restarts the worker at most once per finding signature per this

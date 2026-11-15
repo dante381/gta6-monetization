@@ -94,11 +94,27 @@ def video_filter(g: Geometry, hook_idx: int | None, hook_y: int) -> str:
     return ";".join(parts)
 
 
-def encoder_args(cfg_prod, crop_right: int = 8) -> list[str]:
+def hook_filter(out_w: int, out_h: int, hook_y: int, hook_idx: int = 1) -> str:
+    """Pass 2: overlay the hook PNG on an already-rendered 9:16 clip (input 0 = clip, input
+    `hook_idx` = PNG). A SINGLE overlay_cuda on a decoded file is reliable; chaining it after the
+    bg+fg overlay is not (see render_video_filter note in produce.py): the first overlay's output
+    frames change size/format and the second CUDA filter rejects them at some seek points.
+    The decoded clip is NV12, overlay_cuda only takes yuva420p on yuv420p, hence the convert."""
+    return (f"[0:v]scale_cuda={out_w}:{out_h}:format=yuv420p[m];"
+            f"[{hook_idx}:v]format=yuva420p,hwupload_cuda[hk];"
+            f"[m][hk]overlay_cuda=0:{hook_y}[vout]")
+
+
+def encoder_args(cfg_prod, crop_right: int = 8, cq: int | None = None) -> list[str]:
+    """NVENC args. `cq` overrides the configured quality (used for the high-quality intermediate
+    of a two-pass render, where the rate cap is also dropped)."""
     nv = cfg_prod.get("nvenc", {}) or {}
-    args = ["-c:v", "h264_nvenc", "-preset", str(nv.get("preset", "p5")), "-cq", str(nv.get("cq", 23))]
-    if nv.get("maxrate"):
+    args = ["-c:v", "h264_nvenc", "-preset", str(nv.get("preset", "p5")),
+            "-cq", str(cq if cq is not None else nv.get("cq", 23))]
+    if nv.get("maxrate") and cq is None:
         args += ["-b:v", "0", "-maxrate", str(nv["maxrate"]), "-bufsize", str(nv.get("bufsize") or nv["maxrate"])]
+    elif cq is not None:
+        args += ["-b:v", "0"]
     if crop_right > 0:
         args += ["-bsf:v", f"h264_metadata=crop_right={crop_right}"]
     return args

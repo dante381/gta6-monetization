@@ -345,3 +345,32 @@ def test_default_commands():
 def test_parse_args():
     a = sv.parse_args(["--url", "u", "--no-repair", "--once"])
     assert a.url == "u" and a.no_repair and a.once
+
+
+def test_health_restarts_stuck_worker_without_counting_a_crash(tmp_path, state):
+    marker = tmp_path / "n.txt"
+    wrk = script(tmp_path, "worker", f"""
+        import pathlib, sys, time
+        sys.path.insert(0, r"{paths.ROOT}")
+        from clipper import heartbeat
+        m = pathlib.Path(r"{marker}")
+        n = int(m.read_text()) if m.exists() else 0
+        m.write_text(str(n + 1))
+        if n >= 1:
+            sys.exit(0)           # second run is healthy and finishes
+        while True:               # alive and beating, but never progresses
+            heartbeat.beat("worker", stage="produce", cand="c1"); time.sleep(0.2)
+        """)
+    rec = script(tmp_path, "rec", "import sys; sys.exit(0)")
+    cfg = load_config(overrides={"supervisor": {**FAST["supervisor"], "hang_s": 5, "startup_grace_s": 5},
+                                 "health": {"interval_s": 0.3, "stuck_stage_s": 0.8}})
+    seen = []
+    sup = make(tmp_path, state, rec, wrk, cfg=cfg, repair=False, notifier=seen.append)
+    run_with_timeout(sup)
+    assert int(marker.read_text()) == 2
+    hr = events("health_restart")
+    assert len(hr) == 1 and hr[0]["code"] == "stuck_stage"
+    assert not events("crash") and not events("hang")
+    assert sup.worker.crash_times == {}
+    assert [f.code for f in seen] == ["stuck_stage"]
+    assert heartbeat.read("supervisor") is None   # cleared at shutdown

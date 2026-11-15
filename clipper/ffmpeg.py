@@ -30,11 +30,16 @@ GPU_DECODE = ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
 # Decode on the GPU, frames delivered to system memory (for small analysis frames only).
 GPU_DECODE_TO_RAM = ["-hwaccel", "cuda"]
 
+# Only errors that mean "the GPU / driver is not usable right now". These make run_gpu wait and
+# retry, so they must NOT match ordinary failures (bad filter graph, bad input, bad arguments):
+# those merely mention nvenc/cuvid/CUDA in their text and would otherwise retry forever.
 GPU_ERROR_PATTERNS = (
     "no nvenc capable devices", "openencodesessionex failed", "cannot load nvcuda", "cannot load nvencodeapi",
-    "cuda_error", "cuinit", "cuctxcreate", "failed setup for format cuda", "hwaccel initialisation returned error",
-    "device creation failed", "no device available for decoder", "nvenc", "cuvid", "nvdec",
-    "out of memory", "driver does not support the required nvenc api version",
+    "cuda_error_no_device", "cuda_error_not_initialized", "cuda_error_out_of_memory", "cuda_error_launch_failed",
+    "cuda_error_unknown", "cuda_error_deinitialized", "cuda_error_device_unavailable", "cuda_error_hardware_stack_error",
+    "no cuda-capable device", "cuinit failed", "cuctxcreate failed", "hwaccel initialisation returned error",
+    "device creation failed", "failed to create cuda device", "driver does not support the required nvenc api version",
+    "nvenc: out of memory", "encoder out of memory", "incompatible driver",
 )
 
 

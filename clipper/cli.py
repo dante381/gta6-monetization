@@ -4,6 +4,7 @@
   record       recorder process        (normally started by the supervisor)
   work         processing worker       (normally started by the supervisor)
   supervise    supervisor: starts + restarts recorder and worker  (the one you run)
+  health       show problems now; --watch prints one line per new problem (also runs inside supervise)
   auth         one-time YouTube sign-in
   publish      publish whatever is still queued (honours PAUSE / test mode), then exit
   report       post-stream report
@@ -31,6 +32,8 @@ def main(argv: list[str] | None = None) -> int:
         from .worker import main as m
     elif cmd == "publish":
         from .publish.publisher import main as m
+    elif cmd == "health":
+        from .health import main as m
     elif cmd == "supervise":
         from .supervisor.supervisor import main as m
     elif cmd == "auth":

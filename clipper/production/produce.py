@@ -64,9 +64,9 @@ def build_command(cand: Candidate, chunks: list[Chunk], cfg, work: Path) -> tupl
             ph = im.height
         hook_y = max(0, min(hook_y, g.fg_y - 8 - ph))   # stay in the bg area above the fg
         hook_y -= hook_y % 2
-        args += ["-i", str(hook_png)]                    # single frame, NO -loop (see CONTRACTS)
-        hook_idx = n_in
-        n_in += 1
+        # The hook is NOT in this graph. Chaining a second overlay_cuda after the bg+fg overlay fails
+        # on real footage (frame size/format changes on the first overlay's output, depending on the
+        # seek position). The hook is overlaid in a second pass over the finished clip instead.
 
     ranges = audio_mix.clip_ranges(cand.radio_ranges, cand.start_s, dur)
     duck_types = {str(s).lower() for s in (p.get("duck_scene_types") or [])}
@@ -93,9 +93,12 @@ def build_command(cand: Candidate, chunks: list[Chunk], cfg, work: Path) -> tupl
                                fade_s=float(p.get("audio_fade_s", 1.0)),
                                music_volume=float(p.get("music_volume", 0.8)),
                                duck_volume=float(p.get("duck_volume", 0.25)))
-    graph = layout.video_filter(g, hook_idx, hook_y) + ";" + ap.filter
+    graph = layout.video_filter(g, None, hook_y) + ";" + ap.filter
+    # With a hook, this pass is an intermediate: encode it near-lossless so the second encode
+    # (pass 2) doesn't visibly compound the loss. Without a hook it is the final render.
+    pass1_cq = int(p.get("intermediate_cq", 14)) if hook_png is not None else None
     args += ["-filter_complex", graph, "-map", "[vout]", "-map", f"[{ap.label}]",
-             *layout.encoder_args(p, int(p.get("crop_right_px", 8))),
+             *layout.encoder_args(p, int(p.get("crop_right_px", 8)), cq=pass1_cq),
              "-c:a", "aac", "-b:a", str(p.get("audio_bitrate", "192k")), "-ar", "48000", "-ac", "2",
              "-t", f"{dur:.3f}", "-map_metadata", "-1", "-movflags", "+faststart", "-f", "mp4"]
     meta = {"geometry": g, "source": info, "seek_s": src.seek_s, "duration_s": dur, "hook_png": hook_png,
@@ -144,19 +147,36 @@ def produce_clip(cand: Candidate, chunks: list[Chunk], cfg,
         if on_tick:
             on_tick()
 
-        info = _probe_video(render)
         W, H = int(p.get("width", 1080)), int(p.get("height", 1920))
-        if info["width"] != W:
-            coded = info["coded_width"] or info["width"] + int(p.get("crop_right_px", 8))
-            fix = coded - W
-            if fix < 0:
-                raise ProductionError(f"render is {info['width']} wide (coded {coded}), cannot crop to {W}")
-            log.warning("render width %d (coded %d): remuxing with crop_right=%d", info["width"], coded, fix)
-            fixed = work / "fixed.mp4"
-            _gpu(["-i", str(render), "-map", "0", "-c", "copy", "-bsf:v", f"h264_metadata=crop_right={fix}",
-                  "-movflags", "+faststart", "-f", "mp4", str(fixed)], cfg, on_tick, 120)
-            render = fixed
-            info = _probe_video(render)
+
+        def ensure_width(path: Path, tag: str) -> tuple[Path, dict]:
+            """overlay_cuda output is coded wider than 1080: remux with the right crop if needed."""
+            inf = _probe_video(path)
+            if inf["width"] != W:
+                coded = inf["coded_width"] or inf["width"] + int(p.get("crop_right_px", 8))
+                fix = coded - W
+                if fix < 0:
+                    raise ProductionError(f"render is {inf['width']} wide (coded {coded}), cannot crop to {W}")
+                log.warning("%s width %d (coded %d): remuxing with crop_right=%d", tag, inf["width"], coded, fix)
+                fixed = work / f"fixed_{tag}.mp4"
+                _gpu(["-i", str(path), "-map", "0", "-c", "copy", "-bsf:v", f"h264_metadata=crop_right={fix}",
+                      "-movflags", "+faststart", "-f", "mp4", str(fixed)], cfg, on_tick, 120)
+                path = fixed
+                inf = _probe_video(path)
+            return path, inf
+
+        render, info = ensure_width(render, "pass1")
+        if meta["hook_png"] is not None:
+            hooked = work / "hooked.mp4"
+            _gpu([*ffmpeg.GPU_DECODE, "-i", str(render), "-i", str(meta["hook_png"]),
+                  "-filter_complex", layout.hook_filter(W, H, int(meta["hook_y"])),
+                  "-map", "[vout]", "-map", "0:a?",
+                  *layout.encoder_args(p, int(p.get("crop_right_px", 8))),
+                  "-c:a", "copy", "-map_metadata", "-1", "-movflags", "+faststart", "-f", "mp4", str(hooked)],
+                 cfg, on_tick, timeout)
+            if on_tick:
+                on_tick()
+            render, info = ensure_width(hooked, "pass2")
         tol = max(1.0, 0.05 * dur)
         if (info["width"], info["height"]) != (W, H) or info["codec"] != "h264" \
                 or abs(info["duration"] - dur) > tol:
