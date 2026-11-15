@@ -1,0 +1,27 @@
+{
+  "type": "object",
+  "properties": {
+    "frames": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "t": {"type": "number", "description": "timestamp label printed on the tile, seconds"},
+          "kind": {"type": "string", "enum": ["gameplay", "cutscene", "menu", "loading", "map", "other"]},
+          "hud_events": {
+            "type": "array",
+            "items": {"type": "string", "enum": ["wanted_up", "wanted_stars", "wasted", "busted", "mission_passed", "mission_failed", "notification", "other"]}
+          },
+          "wanted_stars": {"type": "integer", "minimum": 0, "maximum": 5},
+          "title_text": {"type": ["string", "null"], "description": "large centred on-screen text (mission title, location, credits), else null"},
+          "action": {"type": "integer", "minimum": 0, "maximum": 10},
+          "scene_tag": {"type": ["string", "null"], "description": "2-4 word scene/location label, e.g. 'beach chase', 'strip club interior'"}
+        },
+        "required": ["t", "kind", "hud_events", "wanted_stars", "title_text", "action", "scene_tag"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["frames"],
+  "additionalProperties": false
+}

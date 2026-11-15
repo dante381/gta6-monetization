@@ -1,0 +1,10 @@
+numpy>=2.3
+opencv-python-headless>=4.12
+Pillow>=11.3
+PyYAML>=6.0.2
+psutil>=7.0
+google-api-python-client>=2.150
+google-auth-oauthlib>=1.2
+google-auth-httplib2>=0.2
+yt-dlp[default]
+pytest>=8.3

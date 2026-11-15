@@ -1,0 +1,23 @@
+# environment / downloads (kept inside the project, never committed)
+.venv/
+tools/
+.tmp/
+.cache/
+__pycache__/
+*.pyc
+
+# runtime data
+data/
+music/*
+!music/README.md
+hud_refs/*.png
+hud_refs/*.jpg
+
+# secrets
+client_secret.json
+client_secret*.json
+secrets/
+token.json
+
+# kill switch
+PAUSE

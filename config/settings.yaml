@@ -1,0 +1,103 @@
+# Tunable settings. Calibration (Claude Code + your marks) edits this file.
+# Threshold / caps / kill switch / test_mode live in locked.yaml.
+
+stream:
+  url: ""                         # stream URL or channel /live URL (https://www.youtube.com/@channel/live)
+  format: "best[height<=720]"
+  live_poll_s: 60                 # how often to check whether the channel is live
+
+recorder:
+  chunk_seconds: 300
+  stall_seconds: 60               # chunk file not growing for this long => reconnect
+  reconnect_backoff_s: [5, 10, 30, 60]
+  end_confirm_checks: 3           # consecutive "not live" answers before declaring end
+
+analysis:
+  frame_interval_s: 3             # one frame every 3 s for Claude
+  frame_size: [320, 180]
+  grid_cols: 4
+  grid_rows: 5                    # 20 frames per grid, 5 grids per 5-minute chunk
+  motion_fps: 2
+  motion_size: [64, 36]
+  letterbox_rows_frac: 0.10       # top/bottom band height checked for black bars
+  letterbox_luma_max: 20          # band mean luma below this (0..255) counts as black
+  audio_rate: 16000
+  audio_hop_s: 0.5
+  audio_block_s: 10
+  baseline_minutes: 10            # rolling "recent average" window
+  radio_min_s: 20                 # tonal stretch at least this long => radio/music
+  hud_ref_max_images: 6
+
+scoring:
+  peak_min_gap_s: 20
+  pre_roll_s: 6                   # clip starts this long before the peak
+  clip_min_s: 20
+  clip_max_s: 45
+  cutscene_min_s: 30
+  letterbox_share: 0.6            # share of window with bars => cutscene track
+  gameplay_weights:
+    audio_spike: 30
+    action: 25
+    hud_events: 20
+    sound_type: 15
+    duration: 10
+  cutscene_weights:
+    title_text: 30
+    spectacle: 25
+    newness: 25
+    music_swell: 20
+  penalties:
+    menu_loading: 30              # points removed when window is mostly menu/map/loading
+    repeat: 25                    # points removed for a repeat
+    radio_audio_factor: 0.3       # audio_spike/sound_type multiplied by this inside radio
+  repeat_window_s: 60
+  judge_weight: 0.3               # final = (1-w)*signal + w*rating*10
+  judge_frames: 4
+
+production:
+  width: 1080
+  height: 1920
+  fg_height: 608                  # 1080 x 608 full frame in the middle
+  bg_blur_size: [54, 96]          # shrink to this then enlarge => blur
+  hook_top_px: 220
+  hook_font_size: 72
+  hook_max_chars: 40
+  font_path: "C:/Windows/Fonts/arialbd.ttf"
+  nvenc:
+    preset: p5
+    cq: 23
+    maxrate: "10M"
+    bufsize: "20M"
+  audio_bitrate: "192k"
+  audio_fade_s: 1.0
+  music_volume: 0.8
+  duck_volume: 0.25               # game audio level under music bed for ducked cutscene types
+  duck_scene_types: []            # scene tags that keep getting claimed
+
+publish:
+  slot_hours: 2.4                 # one Short every 2.4 h  (2 to 3 h)
+  first_slot_delay_min: 30
+  daily_upload_limit: 100
+  upload_backups: true            # 50-74 clips uploaded unlisted after the day's scheduled posts
+  category_id: "20"               # Gaming
+  game_name: "GTA 6"
+  base_hashtags: ["#Shorts", "#GTA6"]
+  default_language: "en"
+
+supervisor:
+  heartbeat_s: 30
+  hang_s: 120
+  backoff_s: [5, 15, 30, 60, 120, 300]
+  stable_reset_s: 600
+  crash_window_s: 600
+  crash_count: 3
+  max_repairs_per_stream: 3
+  repair_timeout_s: 1800
+
+claude:
+  model: claude-sonnet-5-5
+  effort_grid: low
+  effort_judge: medium
+  effort_repair: high
+  effort_report: low
+  timeout_s: 300

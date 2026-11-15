@@ -1,0 +1,11 @@
+# Locked settings: the repair agent may NOT edit this file (supervisor rejects any diff touching it).
+thresholds:
+  publish: 75        # final score >= 75 -> queued for scheduled publishing
+  backup: 50         # 50..74 -> backup (unlisted); below -> dropped
+  judge_gate: 60     # signal score >= 60 -> Claude judge
+caps:
+  daily_total: 10
+  daily_cutscene: 3
+kill_switch_file: PAUSE
+test_mode: true      # true: everything runs except uploads
+memory_limit_mb: 2048

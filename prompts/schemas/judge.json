@@ -1,0 +1,14 @@
+{
+  "type": "object",
+  "properties": {
+    "rating": {"type": "integer", "minimum": 1, "maximum": 10, "description": "would a stranger scrolling Shorts watch this"},
+    "title": {"type": "string", "maxLength": 90},
+    "description": {"type": "string", "maxLength": 600},
+    "hashtags": {"type": "array", "items": {"type": "string"}, "maxItems": 8},
+    "hook": {"type": "string", "maxLength": 40, "description": "short on-screen hook line"},
+    "spoiler": {"type": "boolean", "description": "true if it shows story / cutscene content"},
+    "reason": {"type": "string", "maxLength": 200}
+  },
+  "required": ["rating", "title", "description", "hashtags", "hook", "spoiler", "reason"],
+  "additionalProperties": false
+}
