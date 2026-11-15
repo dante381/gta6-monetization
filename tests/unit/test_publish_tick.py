@@ -98,12 +98,16 @@ def events(kind: str | None = None) -> list[dict]:
 
 
 @pytest.fixture
-def pcfg():
-    """Real config, test_mode off, UTC days, and a private kill-switch file per test."""
+def pcfg(tmp_path, monkeypatch):
+    """Real config, test_mode off (cfg AND a temp locked.yaml, which publish_tick re-reads live),
+    UTC days, and a private kill-switch file per test."""
     c = load_config(overrides={"publish": {"timezone": "UTC", "slot_hours": 2.4,
                                            "first_slot_delay_min": 30, "upload_backups": True,
                                            "daily_upload_limit": 100,
                                            "delete_after_upload": False}})
+    live = tmp_path / "locked_live.yaml"          # loaded config above used the real file
+    live.write_text("test_mode: false\n", encoding="utf-8")
+    monkeypatch.setattr(paths, "LOCKED_YAML", live)
     c.locked.test_mode = False
     c.locked.kill_switch_file = f".tmp/PAUSE_pytest_{uuid.uuid4().hex}"
     yield c

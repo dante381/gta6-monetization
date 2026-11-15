@@ -30,6 +30,13 @@ from .state import StateDB
 
 log = logging.getLogger("worker")
 
+MAX_CHUNK_FAILURES = 3
+
+
+def _is_gpu_wait(exc: BaseException) -> bool:
+    from .ffmpeg import GpuUnavailable
+    return isinstance(exc, GpuUnavailable)
+
 
 class Worker:
     def __init__(self, cfg, state: StateDB, hb: heartbeat.Heartbeat | None = None, *,
@@ -82,7 +89,7 @@ class Worker:
             if sid:
                 chunk = self.state.next_chunk_to_process(sid)
                 if chunk is not None:
-                    self.process_chunk(chunk)
+                    self.process_chunk_safely(chunk)
                     did_work = True
                 did_work |= self.produce_pending(sid) > 0
                 self.cleanup(sid)
@@ -105,6 +112,28 @@ class Worker:
             self.tick()
 
     # ------------------------------------------------------------------ chunk processing
+    def process_chunk_safely(self, chunk: Chunk) -> None:
+        """process_chunk, but a chunk that keeps failing is quarantined after MAX_CHUNK_FAILURES
+        so it can't block every later chunk. Failures count in kv `chunkfail.<stream>.<idx>`.
+        GPU-unavailable and keyboard interrupts still propagate (retry later, never skip)."""
+        key = f"chunkfail.{chunk.stream_id}.{chunk.idx}"
+        try:
+            self.process_chunk(chunk)
+        except Exception as e:  # noqa: BLE001
+            if _is_gpu_wait(e):
+                raise
+            n = int(self.state.kv_get(key, 0)) + 1
+            self.state.kv_set(key, n)
+            log.exception("chunk %d failed (%d/%d)", chunk.idx, n, MAX_CHUNK_FAILURES)
+            logmod.event("chunk_failed", stream_id=chunk.stream_id, chunk=chunk.idx, attempt=n,
+                         error=f"{type(e).__name__}: {e}"[:300])
+            if n >= MAX_CHUNK_FAILURES:
+                self.state.update_chunk(chunk.stream_id, chunk.idx, status="failed")
+                logmod.attention(f"chunk {chunk.idx} of {chunk.stream_id} failed {n} times and was skipped "
+                                 f"(file kept: {chunk.path})")
+            else:
+                self.state.update_chunk(chunk.stream_id, chunk.idx, status="recorded")
+
     def process_chunk(self, chunk: Chunk) -> list[Candidate]:
         sid = chunk.stream_id
         log.info("processing chunk %d (%s)", chunk.idx, chunk.path)
@@ -155,8 +184,17 @@ class Worker:
                 log.warning("candidate %s too short after clamping; skipping", cand.id)
                 self.state.mark_produced(cand.id)
                 continue
-            sidecar = self._stage("produce_clip")(cand, chunks, self.cfg, on_tick=self.tick)
-            self._stage("enqueue")(sidecar, self.state, self.cfg)
+            try:
+                sidecar = self._stage("produce_clip")(cand, chunks, self.cfg, on_tick=self.tick)
+                self._stage("enqueue")(sidecar, self.state, self.cfg)
+            except Exception as e:  # noqa: BLE001
+                if _is_gpu_wait(e):
+                    raise  # GPU unavailable: let the worker restart / wait, never skip the clip
+                # One bad candidate must not block every later clip and chunk (crash loop).
+                log.exception("producing candidate %s failed; giving up on it", cand.id)
+                logmod.event("clip_failed", cand=cand.id, error=f"{type(e).__name__}: {e}"[:300])
+                self.state.mark_produced(cand.id)
+                continue
             self.state.save_candidate(cand, sid, produced=True)
             produced += 1
         return produced
@@ -188,18 +226,18 @@ class Worker:
     def cleanup(self, sid: str, final: bool = False) -> int:
         if self.state.keep_chunks():
             return 0
-        chunks = self.state.chunks(sid)
-        by_idx = {c.idx: c for c in chunks}
+        chunks = self.state.chunks(sid)  # ordered by idx
         done = bool(self.state.kv_get("recorder.done", False))
         deleted = 0
-        for c in chunks:
+        for pos, c in enumerate(chunks):
             if c.status != "processed":
                 continue
             if not self._chunk_clips_cut(sid, c):
                 continue
             self.state.mark_clips_cut(sid, c.idx)
-            nxt = by_idx.get(c.idx + 1)
-            next_ok = (nxt is not None and nxt.status in ("processed", "deleted")) or (final and done)
+            # "next chunk" = the next one recorded (indexes can skip when an empty segment is dropped)
+            nxt = chunks[pos + 1] if pos + 1 < len(chunks) else None
+            next_ok = (nxt is not None and nxt.status in ("processed", "deleted", "failed")) or (final and done)
             if not next_ok:
                 continue
             self._delete_chunk_files(sid, c)

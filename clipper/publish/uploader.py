@@ -34,6 +34,11 @@ class UploadError(RuntimeError):
     """The upload failed for this item (counts as one attempt)."""
 
 
+class UploadPaused(Exception):
+    """The PAUSE kill switch appeared mid-upload: the upload was abandoned cleanly. It is not a
+    failure (no attempt is counted) and the item stays queued."""
+
+
 class QuotaExceeded(UploadError):
     """Daily quota / upload limit / rate limit hit: stop uploading until the next Pacific day."""
 
@@ -175,7 +180,8 @@ def upload(youtube: Any, item: QueueItem, sidecar: ClipSidecar, cfg: Any,
     """Upload one clip. Returns the new video id.
 
     Retries 5xx and connection errors with exponential backoff (max MAX_RETRIES). Raises
-    QuotaExceeded on 403/429 quota or rate errors, UploadError on anything else.
+    QuotaExceeded on 403/429 quota or rate errors, UploadError on anything else. The PAUSE file
+    is re-checked before every chunk; if it appears, raises UploadPaused (clean abort).
     """
     from googleapiclient.errors import HttpError
     from googleapiclient.http import MediaFileUpload
@@ -194,6 +200,8 @@ def upload(youtube: Any, item: QueueItem, sidecar: ClipSidecar, cfg: Any,
         request = youtube.videos().insert(part="snippet,status", body=body, media_body=media)
         response = None
         while response is None:
+            if _paused(cfg):
+                raise UploadPaused(f"PAUSE appeared during upload of {item.clip_id}")
             try:
                 _status, response = request.next_chunk()
                 if on_tick:
@@ -228,6 +236,14 @@ def upload(youtube: Any, item: QueueItem, sidecar: ClipSidecar, cfg: Any,
     if not vid:
         raise UploadError(f"upload finished without a video id: {str(response)[:200]}")
     return vid
+
+
+def _paused(cfg: Any) -> bool:
+    try:
+        from .. import config
+        return bool(config.paused(cfg))
+    except Exception:
+        return False
 
 
 def _sleep_ticking(sleep: Callable[[float], None], seconds: float,

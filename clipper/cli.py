@@ -5,6 +5,7 @@
   work         processing worker       (normally started by the supervisor)
   supervise    supervisor: starts + restarts recorder and worker  (the one you run)
   auth         one-time YouTube sign-in
+  publish      publish whatever is still queued (honours PAUSE / test mode), then exit
   report       post-stream report
   calibrate    export / summarize calibration review
   autostart    register / unregister / status of the Windows scheduled task
@@ -28,6 +29,8 @@ def main(argv: list[str] | None = None) -> int:
         from .recorder.recorder import main as m
     elif cmd == "work":
         from .worker import main as m
+    elif cmd == "publish":
+        from .publish.publisher import main as m
     elif cmd == "supervise":
         from .supervisor.supervisor import main as m
     elif cmd == "auth":

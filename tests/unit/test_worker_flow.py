@@ -161,6 +161,77 @@ def test_run_exits_after_stream_end_and_drains(state, cfg, tmp_path):
     assert [o for o in st.order if o[0] == "audio"] == [("audio", 0), ("audio", 1)]
 
 
+def test_bad_candidate_does_not_block_others(state, cfg, tmp_path):
+    _mk_chunks(state, tmp_path, n=2)
+    sid = state.current_stream()
+    st = Stages({0: [cand("bad", 0, 10, 40, score=90), cand("good", 0, 100, 140, score=80)]})
+    real_produce = st.produce
+
+    def produce(c, chunks, cfg, on_tick=None):
+        if c.id == "bad":
+            raise ValueError("render exploded")
+        return real_produce(c, chunks, cfg, on_tick)
+
+    w = Worker(cfg, state, analyze_audio=st.audio, analyze_video=st.video, score_chunk=st.score,
+               produce_clip=produce, publish_tick=st.publish, enqueue=st.enqueue, idle_sleep_s=0)
+    w.process_chunk(state.next_chunk_to_process(sid))
+    assert w.produce_pending(sid) == 1                       # "good" produced, "bad" given up
+    assert st.enqueued == ["good"]
+    assert w.produce_pending(sid) == 0                       # "bad" is not retried forever
+
+
+def test_gpu_unavailable_is_not_swallowed(state, cfg, tmp_path):
+    import pytest
+    from clipper.ffmpeg import GpuUnavailable
+    _mk_chunks(state, tmp_path, n=2)
+    sid = state.current_stream()
+    st = Stages({0: [cand("a", 0, 10, 40)]})
+
+    def produce(c, chunks, cfg, on_tick=None):
+        raise GpuUnavailable("nvenc gone")
+
+    w = Worker(cfg, state, analyze_audio=st.audio, analyze_video=st.video, score_chunk=st.score,
+               produce_clip=produce, publish_tick=st.publish, enqueue=st.enqueue, idle_sleep_s=0)
+    w.process_chunk(state.next_chunk_to_process(sid))
+    with pytest.raises(GpuUnavailable):
+        w.produce_pending(sid)
+    assert not state.candidates(sid, produced=True)          # still pending, retried later
+
+
+def test_failing_chunk_is_quarantined_after_three_tries(state, cfg, tmp_path):
+    _mk_chunks(state, tmp_path, n=2)
+    sid = state.current_stream()
+    st = Stages({})
+
+    def audio(chunk, cfg, state, on_tick=None):
+        if chunk.idx == 0:
+            raise RuntimeError("corrupt chunk")
+        return st.audio(chunk, cfg, state, on_tick)
+
+    w = Worker(cfg, state, analyze_audio=audio, analyze_video=st.video, score_chunk=st.score,
+               produce_clip=st.produce, publish_tick=st.publish, enqueue=st.enqueue, idle_sleep_s=0)
+    for _ in range(3):
+        w.process_chunk_safely(state.next_chunk_to_process(sid))
+    assert state.get_chunk(sid, 0).status == "failed"
+    assert state.next_chunk_to_process(sid).idx == 1         # later chunks are no longer blocked
+    w.process_chunk_safely(state.next_chunk_to_process(sid))
+    assert state.get_chunk(sid, 1).status == "processed"
+
+
+def test_cleanup_handles_index_gaps(state, cfg, tmp_path):
+    sid = state.current_stream()
+    ps = []
+    for i, idx in enumerate([0, 2, 3]):                      # chunk 1 was an empty segment and dropped
+        p = tmp_path / f"c{idx}.ts"
+        p.write_bytes(b"x")
+        ps.append(p)
+        state.add_chunk(Chunk(idx=idx, path=str(p), start_s=i * 300.0, duration_s=300.0, stream_id=sid))
+    w = _worker(cfg, state, Stages({}))
+    for _ in range(2):
+        w.process_chunk(state.next_chunk_to_process(sid))
+    assert w.cleanup(sid) == 1 and not ps[0].exists()        # chunk 0 deleted although idx 1 is missing
+
+
 def test_publish_error_does_not_stop_worker(state, cfg, tmp_path):
     _mk_chunks(state, tmp_path, n=1)
     state.kv_set("recorder.done", True)

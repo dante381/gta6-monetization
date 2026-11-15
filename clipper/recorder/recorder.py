@@ -81,6 +81,9 @@ class Recorder:
     # ------------------------------------------------------------------ public
     def run(self) -> int:
         self.hb.force(phase="waiting", url=self.url)
+        # A previous stream's "done" flag must not make the worker exit (and the supervisor restart
+        # it in a loop) while this run is still waiting for the next stream to go live.
+        self.state.kv_set("recorder.done", False)
         info = stream.wait_until_live(self.url, self.cfg, self.hb, runner=self.runner, sleep=self.sleep)
         self._open_stream(info)
         attempt = 0
